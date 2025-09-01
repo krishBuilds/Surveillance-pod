@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}InternVideo2.5 Surveillance System{% endblock %}</title>
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    
+    <!-- CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <!-- Sidebar -->
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <h1 class="sidebar-title">
+                <i class="fas fa-video"></i>
+            </h1>
+        </div>
+        
+        <div class="sidebar-nav">
+            <div class="nav-item">
+                <a href="#" class="nav-link active" data-page="chat" title="Video Chat">
+                    <i class="fas fa-comments nav-icon"></i>
+                    <span class="nav-text">Video Chat</span>
+                </a>
+            </div>
+            
+            <div class="nav-item">
+                <a href="#" class="nav-link" data-page="caption" title="Caption Generator">
+                    <i class="fas fa-closed-captioning nav-icon"></i>
+                    <span class="nav-text">Caption Generator</span>
+                </a>
+            </div>
+            
+            <div class="nav-item">
+                <a href="#" class="nav-link" data-page="analysis" title="Video Analysis">
+                    <i class="fas fa-chart-line nav-icon"></i>
+                    <span class="nav-text">Video Analysis</span>
+                </a>
+            </div>
+            
+            <hr style="margin: 0.5rem; border-color: var(--border-color);">
+            
+            <div class="nav-item">
+                <div style="padding: 0.5rem; text-align: center;">
+                    <span id="system-status" class="status-indicator status-info" title="System Status" style="font-size: 0.75rem;">●</span>
+                </div>
+            </div>
+            
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Mobile Sidebar Toggle -->
+        <button class="sidebar-toggle btn btn-outline" style="display: none; margin-bottom: 1rem;">
+            <i class="fas fa-bars"></i>
+        </button>
+
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- JavaScript -->
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {% block extra_js %}{% endblock %}
+
+    <!-- Mobile responsive script -->
+    <script>
+        // Show sidebar toggle on mobile
+        if (window.innerWidth <= 768) {
+            document.querySelector('.sidebar-toggle').style.display = 'inline-flex';
+        }
+    </script>
+</body>
+</html>

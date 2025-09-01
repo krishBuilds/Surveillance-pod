@@ -459,6 +459,56 @@ class ModelManager:
         else:
             logger.info("Instance references cleaned up (shared model kept loaded)")
     
+    def clear_processing_cache(self):
+        """Clear embeddings, tokens, and processing data while keeping model alive"""
+        logger.info("Clearing processing cache and embeddings while keeping model alive...")
+        
+        # Clear temporal analysis data
+        self.current_frame_timestamps = []
+        self.current_video_fps = 0.0
+        self.current_video_path = ""
+        
+        # Clear any cached embeddings or processed data from the model if it exists
+        if self.model and hasattr(self.model, 'clear_cache'):
+            self.model.clear_cache()
+        
+        # Clear tokenizer cache if it exists
+        if self.tokenizer and hasattr(self.tokenizer, 'clear'):
+            try:
+                # Clear internal tokenizer caches
+                if hasattr(self.tokenizer, '_tokenizer'):
+                    self.tokenizer._tokenizer.clear()
+            except Exception as e:
+                logger.debug(f"Tokenizer cache clear failed (normal): {e}")
+        
+        # Clear GPU cache without affecting loaded model
+        if self.device == "cuda":
+            # Get current memory before cleanup
+            if torch.cuda.is_available():
+                memory_before = torch.cuda.memory_allocated() / 1024**3
+                torch.cuda.empty_cache()
+                memory_after = torch.cuda.memory_allocated() / 1024**3
+                logger.info(f"CUDA cache cleared: {memory_before:.2f}GB -> {memory_after:.2f}GB")
+        
+        # Clear any intermediate processing tensors that might be cached
+        import gc
+        gc.collect()
+        
+        logger.info("Processing cache cleared successfully - model remains loaded")
+    
+    def _clear_preprocessed_data(self):
+        """Internal method to clear preprocessed data caches"""
+        # Clear any internal preprocessed image/video data
+        self.current_frame_timestamps = []
+        self.current_video_fps = 0.0 
+        self.current_video_path = ""
+        
+        # Force garbage collection of any lingering tensors
+        import gc
+        gc.collect()
+        
+        logger.info("Preprocessed data cleared")
+    
     # === Video/Image Processing Helper Methods ===
     
     def _build_transform(self, input_size=448):

@@ -1,0 +1,413 @@
+<!-- Caption Generation Page -->
+<div id="caption-page" class="page-content hidden">
+    <div class="page-header">
+        <h1 class="page-title">Video Caption Generator</h1>
+        <p class="page-description">
+            Generate detailed captions for entire videos using FPS-based sampling and chunk processing
+        </p>
+    </div>
+
+    <div class="grid grid-2">
+        <!-- Caption Generation Settings -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <i class="fas fa-closed-captioning nav-icon"></i>
+                    Caption Settings
+                </div>
+                <div class="card-subtitle">Configure caption generation parameters</div>
+            </div>
+            <div class="card-body">
+                <div class="form-group">
+                    <label class="form-label">Select Video:</label>
+                    <select id="caption-video-select" class="form-select">
+                        <option value="">Loading videos...</option>
+                    </select>
+                </div>
+
+                <div class="grid grid-2">
+                    <div class="form-group">
+                        <label class="form-label">FPS Sampling:</label>
+                        <input type="number" id="caption-fps" class="form-input" 
+                               value="1.0" min="0.1" max="3.0" step="0.1">
+                        <small style="color: var(--text-secondary);">Frames per second to analyze (1.0+ recommended)</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Chunk Size (seconds):</label>
+                        <input type="number" id="chunk-size" class="form-input" 
+                               value="60" min="30" max="180" step="10">
+                        <small style="color: var(--text-secondary);">Video segment duration</small>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Processing Mode:</label>
+                    <select id="processing-mode" class="form-select">
+                        <option value="sequential">Sequential Chunks</option>
+                        <option value="overlapping">Overlapping Chunks</option>
+                        <option value="keyframe">Key Frame Detection</option>
+                        <option value="adaptive">Adaptive Sampling</option>
+                    </select>
+                    <small style="color: var(--text-secondary);">How to divide the video for processing</small>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Caption Prompt:</label>
+                    <textarea id="caption-prompt" class="form-textarea" rows="3" 
+                              placeholder="Describe the main sequence of events...">Describe the sequence of events and actions in this video. Include what happens, who is involved, and important movements or changes.</textarea>
+                    <small style="color: var(--text-secondary);">Customize the AI prompt for caption generation</small>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Output Format:</label>
+                    <div class="grid grid-2">
+                        <label style="display: flex; align-items: center; font-size: 0.875rem;">
+                            <input type="radio" name="output-format" value="paragraph" checked style="margin-right: 0.5rem;">
+                            Paragraph Format
+                        </label>
+                        <label style="display: flex; align-items: center; font-size: 0.875rem;">
+                            <input type="radio" name="output-format" value="timestamped" style="margin-right: 0.5rem;">
+                            Timestamped Sections
+                        </label>
+                        <label style="display: flex; align-items: center; font-size: 0.875rem;">
+                            <input type="radio" name="output-format" value="detailed" style="margin-right: 0.5rem;">
+                            Detailed Breakdown
+                        </label>
+                        <label style="display: flex; align-items: center; font-size: 0.875rem;">
+                            <input type="radio" name="output-format" value="summary" style="margin-right: 0.5rem;">
+                            Summary + Details
+                        </label>
+                    </div>
+                </div>
+
+                <button id="generate-caption-btn" class="btn btn-primary w-full">
+                    <i class="fas fa-magic nav-icon"></i>
+                    Generate Caption
+                </button>
+            </div>
+        </div>
+
+        <!-- Processing Progress -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <i class="fas fa-chart-line nav-icon"></i>
+                    Processing Status
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="processing-progress" class="hidden">
+                    <div class="mb-3">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                            <span>Progress</span>
+                            <span id="progress-percentage">0%</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="grid grid-2">
+                        <div>
+                            <strong>Chunk:</strong> <span id="current-chunk">0 / 0</span>
+                        </div>
+                        <div>
+                            <strong>Time:</strong> <span id="processing-time">00:00</span>
+                        </div>
+                        <div>
+                            <strong>Frames:</strong> <span id="frames-processed">0</span>
+                        </div>
+                        <div>
+                            <strong>Status:</strong> <span id="processing-status">Ready</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- System Stats -->
+                <div class="mt-3">
+                    <h4 style="font-size: 1rem; margin-bottom: 1rem;">System Capabilities:</h4>
+                    <div style="font-size: 0.875rem; color: var(--text-secondary);">
+                        <div>📊 <strong>Max Frames:</strong> 160 per chunk (8-bit quantization)</div>
+                        <div>⚡ <strong>Processing Speed:</strong> ~4.9 frames/second</div>
+                        <div>🧠 <strong>Model:</strong> InternVideo2.5 Chat 8B</div>
+                        <div>💾 <strong>Memory:</strong> RTX 4090 24GB (~88% utilization)</div>
+                        <div>🔧 <strong>Optimization:</strong> Flash Attention 2.8.3</div>
+                    </div>
+                </div>
+
+                <!-- Estimation -->
+                <div class="mt-3" style="padding: 1rem; background-color: var(--secondary-color); border-radius: 8px;">
+                    <h5 style="font-size: 0.875rem; margin-bottom: 0.5rem;">⏱️ Time Estimation:</h5>
+                    <div id="time-estimation" style="font-size: 0.75rem; color: var(--text-secondary);">
+                        Select a video to see processing time estimate
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Caption Results -->
+    <div id="caption-results" class="hidden mt-4">
+        <!-- Results will be populated by JavaScript -->
+    </div>
+
+    <!-- Processing Methods Info -->
+    <div class="card mt-4">
+        <div class="card-header">
+            <div class="card-title">
+                <i class="fas fa-info-circle nav-icon"></i>
+                Processing Methods
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="grid grid-2">
+                <div>
+                    <h4 style="font-size: 1rem; margin-bottom: 0.5rem;">📋 Sequential Chunks</h4>
+                    <p style="font-size: 0.875rem; color: var(--text-secondary);">
+                        Processes video in non-overlapping segments. Best for long videos with distinct scenes.
+                    </p>
+                </div>
+                
+                <div>
+                    <h4 style="font-size: 1rem; margin-bottom: 0.5rem;">🔄 Overlapping Chunks</h4>
+                    <p style="font-size: 0.875rem; color: var(--text-secondary);">
+                        Processes with 25% overlap between segments. Better continuity for action sequences.
+                    </p>
+                </div>
+                
+                <div>
+                    <h4 style="font-size: 1rem; margin-bottom: 0.5rem;">🎯 Key Frame Detection</h4>
+                    <p style="font-size: 0.875rem; color: var(--text-secondary);">
+                        Automatically detects scene changes and important frames. Efficient for dynamic content.
+                    </p>
+                </div>
+                
+                <div>
+                    <h4 style="font-size: 1rem; margin-bottom: 0.5rem;">🤖 Adaptive Sampling</h4>
+                    <p style="font-size: 0.875rem; color: var(--text-secondary);">
+                        AI-driven frame selection based on content complexity. Optimal quality-speed balance.
+                    </p>
+                </div>
+            </div>
+
+            <div class="mt-4" style="padding: 1rem; background-color: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;">
+                <div style="color: #92400e;">
+                    <strong>💡 Pro Tips:</strong>
+                </div>
+                <ul style="margin-top: 0.5rem; margin-left: 1rem; font-size: 0.875rem; color: #92400e;">
+                    <li>Use lower FPS (0.5-1.0) for dialogue-heavy videos</li>
+                    <li>Use higher FPS (2.0-3.0) for action-packed content</li>
+                    <li>Smaller chunks (30-60s) for detailed analysis</li>
+                    <li>Larger chunks (120-180s) for overview captions</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Caption Templates -->
+    <div class="card mt-4">
+        <div class="card-header">
+            <div class="card-title">
+                <i class="fas fa-file-alt nav-icon"></i>
+                Caption Templates
+            </div>
+            <div class="card-subtitle">Quick-start prompts for different caption styles</div>
+        </div>
+        <div class="card-body">
+            <div class="grid grid-2">
+                <button class="btn btn-outline template-btn" data-template="detailed">
+                    📝 Detailed Description
+                </button>
+                <button class="btn btn-outline template-btn" data-template="narrative">
+                    📚 Narrative Style
+                </button>
+                <button class="btn btn-outline template-btn" data-template="technical">
+                    🔧 Technical Analysis
+                </button>
+                <button class="btn btn-outline template-btn" data-template="accessibility">
+                    ♿ Accessibility Caption
+                </button>
+                <button class="btn btn-outline template-btn" data-template="social">
+                    📱 Social Media
+                </button>
+                <button class="btn btn-outline template-btn" data-template="educational">
+                    🎓 Educational Content
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Caption templates
+    const templates = {
+        detailed: "List the main events in this video segment in order. For each event, briefly describe: what happens, who/what is involved, and the outcome. Limit to key actions only.",
+        
+        narrative: "Tell what happens in this video as a brief story. Focus on the sequence of main events and character actions. Keep it under 3 sentences per scene.",
+        
+        technical: "Describe the key visual elements: main subjects, their movements, and scene changes. Be factual and concise. Avoid subjective descriptions.",
+        
+        accessibility: "Describe the essential visual information: main actions, people/objects involved, and important movements. Focus on what happens, not how it looks.",
+        
+        social: "What happens in this video? Give a quick 1-2 sentence summary of the main action or event.",
+        
+        educational: "Identify and list the main activities or processes shown in this video. Focus on observable actions and their sequence."
+    };
+
+    // Template buttons
+    document.querySelectorAll('.template-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const template = this.dataset.template;
+            const promptInput = document.querySelector('#caption-prompt');
+            if (promptInput && templates[template]) {
+                promptInput.value = templates[template];
+            }
+        });
+    });
+
+    // Video selection change - update time estimation
+    document.querySelector('#caption-video-select')?.addEventListener('change', function() {
+        updateTimeEstimation();
+    });
+
+    document.querySelector('#caption-fps')?.addEventListener('input', updateTimeEstimation);
+    document.querySelector('#chunk-size')?.addEventListener('input', updateTimeEstimation);
+
+    function updateTimeEstimation() {
+        const videoSelect = document.querySelector('#caption-video-select');
+        const fpsInput = document.querySelector('#caption-fps');
+        const chunkInput = document.querySelector('#chunk-size');
+        const estimationEl = document.querySelector('#time-estimation');
+
+        if (!videoSelect.value) {
+            estimationEl.textContent = 'Select a video to see processing time estimate';
+            return;
+        }
+
+        // Mock calculation - in real app, this would be based on actual video duration
+        const mockVideoDuration = 180; // seconds
+        const fps = parseFloat(fpsInput.value) || 1.0;
+        const chunkSize = parseInt(chunkInput.value) || 60;
+        
+        const chunks = Math.ceil(mockVideoDuration / chunkSize);
+        const framesPerChunk = Math.min(160, fps * chunkSize);
+        const processingTimePerChunk = framesPerChunk / 4.9; // 4.9 frames/second
+        const totalTime = chunks * processingTimePerChunk;
+
+        estimationEl.innerHTML = `
+            <div><strong>${chunks}</strong> chunks × <strong>${framesPerChunk}</strong> frames each</div>
+            <div>Estimated time: <strong>${Math.ceil(totalTime / 60)} minutes ${Math.ceil(totalTime % 60)} seconds</strong></div>
+            <div style="font-size: 0.7rem; opacity: 0.8;">Based on ${fps} FPS sampling and ${chunkSize}s chunks</div>
+        `;
+    }
+});
+</script>
+
+<style>
+/* Real-time caption generation styles */
+.chunk-result {
+    background: var(--secondary-color);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 0.75rem;
+    animation: slideIn 0.3s ease-out;
+}
+
+.chunk-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+    font-size: 0.9rem;
+}
+
+.chunk-timing {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.chunk-content {
+    background: var(--background-color);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.75rem;
+    font-size: 0.9rem;
+    line-height: 1.4;
+}
+
+.cleanup-msg {
+    text-align: center;
+    color: var(--text-secondary);
+    font-style: italic;
+    margin: 0.25rem 0;
+}
+
+.final-caption-header {
+    margin-bottom: 1rem;
+}
+
+.final-caption-header h3 {
+    margin: 0 0 0.5rem 0;
+    color: var(--primary-color);
+}
+
+.caption-stats {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.final-caption-content {
+    background: var(--background-color);
+    border: 2px solid var(--primary-color);
+    border-radius: 8px;
+    padding: 1.5rem;
+    font-size: 1rem;
+    line-height: 1.6;
+}
+
+#live-chunks {
+    max-height: 400px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.5rem;
+    background: var(--background-color);
+}
+
+#progress-section {
+    margin-bottom: 1rem;
+}
+
+#progress-text {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    margin-top: 0.5rem;
+}
+
+/* Animation for new chunks */
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Responsive styles */
+@media (max-width: 768px) {
+    .chunk-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    
+    .chunk-timing {
+        margin-top: 0.25rem;
+    }
+}
+</style>

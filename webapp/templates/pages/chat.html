@@ -1,0 +1,215 @@
+<!-- Video Chat Interface Page -->
+<div id="chat-page" class="page-content">
+    <div class="page-header">
+        <h1 class="page-title">Video Chat Interface</h1>
+        <p class="page-description">
+            Interactive chat with video understanding using InternVideo2.5 with temporal analysis and video snippets
+        </p>
+    </div>
+
+    <div class="grid grid-2">
+        <!-- Video Processing Panel -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <i class="fas fa-video nav-icon"></i>
+                    Video Processing
+                </div>
+                <div class="card-subtitle">Select and process a video for analysis</div>
+            </div>
+            <div class="card-body">
+                <div class="form-group">
+                    <label class="form-label">Select Video:</label>
+                    <select id="video-select" class="form-select">
+                        <option value="">Loading videos...</option>
+                    </select>
+                </div>
+
+                <div class="grid grid-2">
+                    <div class="form-group">
+                        <label class="form-label">Number of Frames:</label>
+                        <input type="number" id="num-frames" class="form-input" 
+                               value="64" min="16" max="160" step="8">
+                        <small style="color: var(--text-secondary);">16-160 frames • Lower = Faster • 64 recommended</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">FPS Sampling (optional):</label>
+                        <input type="number" id="fps-sampling" class="form-input" 
+                               placeholder="e.g., 1.0" min="0.1" max="5.0" step="0.1">
+                        <small style="color: var(--text-secondary);">0.1-5.0 FPS sampling rate</small>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Time Bound (seconds, optional):</label>
+                    <input type="number" id="time-bound" class="form-input" 
+                           placeholder="e.g., 60" min="5" max="600" step="5">
+                    <small style="color: var(--text-secondary);">Limit analysis to first N seconds</small>
+                </div>
+
+                <button id="process-video-btn" class="btn btn-primary w-full">
+                    <i class="fas fa-play nav-icon"></i>
+                    Process Video
+                </button>
+
+                <!-- Processing Status (inline) -->
+                <div id="processing-status" class="mt-3 hidden">
+                    <div class="status-indicator status-info">
+                        <i class="fas fa-spinner fa-spin"></i> Processing video...
+                    </div>
+                </div>
+
+                <!-- Processing Results (inline) -->
+                <div id="processing-results" class="mt-3 hidden">
+                    <!-- Results will be populated by JavaScript -->
+                </div>
+
+                <!-- Video Player -->
+                <div class="mt-3">
+                    <div class="video-container">
+                        <video id="video-player" class="video-player" controls style="width: 100%; max-height: 250px;">
+                            <source src="/video-stream" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    <div class="mt-2">
+                        <small style="color: var(--text-secondary);">
+                            Video will update after processing
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat Interface (replaces second column) -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <i class="fas fa-comments nav-icon"></i>
+                    Chat with Video
+                </div>
+                <div class="card-subtitle">
+                    Ask questions about the processed video
+                </div>
+            </div>
+            <div class="card-body" style="padding: 0;">
+                <div class="chat-container">
+                    <div id="chat-messages" class="chat-messages">
+                        <div class="chat-message assistant">
+                            <div class="mb-2">
+                                <strong>🤖 InternVideo2.5 Assistant</strong>
+                            </div>
+                            <p>Hello! I'm ready to analyze your videos with advanced AI understanding.</p>
+                            <p><strong>Quick Start:</strong></p>
+                            <ol style="margin-left: 1rem; margin-top: 0.5rem;">
+                                <li>📹 Select a video from the dropdown</li>
+                                <li>⚙️ Adjust frame count and FPS settings</li>
+                                <li>▶️ Click "Process Video" to load it</li>
+                                <li>💬 Start asking questions about the video!</li>
+                            </ol>
+                            <div class="mt-2" style="padding: 0.5rem; background-color: #f0f9ff; border-radius: 6px; font-size: 0.875rem;">
+                                <strong>🎯 Features:</strong> 160-frame capacity • Temporal analysis • Video snippets • Flash Attention
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="chat-input-area">
+                        <form id="chat-form" class="chat-input-group">
+                            <input 
+                                type="text" 
+                                id="message-input" 
+                                class="form-input chat-input" 
+                                placeholder="First, process a video above to enable chat..."
+                                disabled
+                            >
+                            <button type="submit" class="btn btn-primary" disabled>
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </form>
+                        <div class="flex" style="justify-content: space-between; margin-top: 0.5rem;">
+                            <div>
+                                <label style="font-size: 0.75rem;">
+                                    <input type="checkbox" id="enable-temporal"> 
+                                    Temporal Analysis (slower)
+                                </label>
+                                <label style="font-size: 0.75rem; margin-left: 1rem;">
+                                    <input type="checkbox" id="generate-snippets"> 
+                                    Video Snippets (slower)
+                                </label>
+                            </div>
+                            <button id="clear-chat-btn" class="btn btn-outline" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;">
+                                Clear Chat
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Example Queries -->
+    <div class="card mt-4">
+        <div class="card-header">
+            <div class="card-title">
+                <i class="fas fa-lightbulb nav-icon"></i>
+                Example Queries
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="grid grid-3">
+                <button class="btn btn-outline example-query" data-query="Describe what happens in this video">
+                    📝 Describe the video
+                </button>
+                <button class="btn btn-outline example-query" data-query="What are the main characters doing?">
+                    👥 Analyze characters
+                </button>
+                <button class="btn btn-outline example-query" data-query="What happens at the beginning, middle, and end?">
+                    🎭 Story structure
+                </button>
+                <button class="btn btn-outline example-query" data-query="Are there any interesting visual details?">
+                    🎨 Visual analysis
+                </button>
+                <button class="btn btn-outline example-query" data-query="What is the mood or atmosphere?">
+                    🌟 Mood analysis
+                </button>
+                <button class="btn btn-outline example-query" data-query="Generate a detailed timeline">
+                    ⏱️ Timeline
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Example query buttons
+    document.querySelectorAll('.example-query').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const query = this.dataset.query;
+            const messageInput = document.querySelector('#message-input');
+            if (messageInput && !messageInput.disabled) {
+                messageInput.value = query;
+                messageInput.focus();
+            }
+        });
+    });
+
+    // Enable chat input when video is processed
+    function enableChat() {
+        const messageInput = document.querySelector('#message-input');
+        const submitBtn = document.querySelector('#chat-form button[type="submit"]');
+        
+        if (messageInput && submitBtn) {
+            messageInput.disabled = false;
+            submitBtn.disabled = false;
+            messageInput.placeholder = "Ask about the video... (e.g., 'What happens at 30 seconds?')";
+        }
+    }
+
+    // Listen for video processing completion
+    // This would be triggered by the main chat interface
+    window.addEventListener('videoProcessed', enableChat);
+});
+</script>

@@ -14,6 +14,7 @@ from datetime import datetime
 import logging
 import threading
 from pathlib import Path
+import torch
 
 # Add parent directory to path to access main_enhanced.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,7 +39,7 @@ DEFAULT_VIDEO = "inputs/videos/bigbuckbunny.mp4"
 enhanced_manager = None
 
 def get_enhanced_manager():
-    """Get or create the enhanced model manager"""
+    """Get or create the enhanced model manager with memory cleanup"""
     global enhanced_manager
     if enhanced_manager is None:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -73,6 +74,15 @@ def get_enhanced_manager():
             logger.info("SUCCESS: Enhanced Model Manager initialized")
             logger.info(f"Model device: {enhanced_manager.model_manager.device}")
             logger.info(f"Model precision: {enhanced_manager.model_manager.precision}")
+            
+            # Clean up any cached data while keeping model loaded
+            logger.info("Cleaning up cache and preprocessed data...")
+            try:
+                enhanced_manager.model_manager.clear_processing_cache()
+                logger.info("Cache cleared successfully")
+            except Exception as cleanup_error:
+                logger.warning(f"Cache cleanup warning: {str(cleanup_error)}")
+            
             logger.info("=== MODEL MANAGER READY ===")
             
         except Exception as e:
@@ -85,6 +95,25 @@ def get_enhanced_manager():
             return None
     
     return enhanced_manager
+
+def startup_cleanup():
+    """Clean up memory and cache on app startup while keeping model loaded"""
+    logger.info("=== WEBAPP STARTUP CLEANUP ===")
+    try:
+        # Clear any existing CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("CUDA cache cleared")
+        
+        # Initialize manager and clean cache
+        manager = get_enhanced_manager()
+        if manager:
+            logger.info("Startup cleanup completed successfully")
+        else:
+            logger.error("Manager initialization failed during startup")
+            
+    except Exception as e:
+        logger.error(f"Startup cleanup error: {str(e)}")
 
 @app.route('/')
 def index():
@@ -108,17 +137,26 @@ def get_available_videos():
                 video_path = os.path.join(videos_dir, filename)
                 file_size = os.path.getsize(video_path)
                 
-                # Try to get video duration using ffprobe
+                # Try to get video duration using cv2 (more reliable than ffprobe)
                 try:
-                    import subprocess
-                    result = subprocess.run([
-                        'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
-                        '-of', 'csv=p=0', video_path
-                    ], capture_output=True, text=True, timeout=5)
-                    
-                    duration = float(result.stdout.strip()) if result.stdout.strip() else 0
-                    duration_str = f"{int(duration//60)}:{int(duration%60):02d}" if duration > 0 else "Unknown"
-                except:
+                    import cv2
+                    cap = cv2.VideoCapture(video_path)
+                    if cap.isOpened():
+                        fps = cap.get(cv2.CAP_PROP_FPS)
+                        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                        duration = frame_count / fps if fps > 0 else 0
+                        
+                        if duration > 0:
+                            minutes = int(duration // 60)
+                            seconds = int(duration % 60)
+                            duration_str = f"{minutes}:{seconds:02d}"
+                        else:
+                            duration_str = "Unknown"
+                        cap.release()
+                    else:
+                        duration_str = "Unknown"
+                except Exception as e:
+                    logger.warning(f"Could not get duration for {filename}: {str(e)}")
                     duration_str = "Unknown"
                 
                 videos.append({
@@ -153,7 +191,7 @@ def process_video():
         
         # Extract parameters (no prompt needed)
         video_file = data.get('video_file', 'bigbuckbunny.mp4')
-        num_frames = int(data.get('num_frames', 120))
+        num_frames = int(data.get('num_frames', 64))
         fps_sampling = float(data.get('fps_sampling', 0)) if data.get('fps_sampling') else None
         time_bound = float(data.get('time_bound', 0)) if data.get('time_bound') else None
         
@@ -479,6 +517,1259 @@ def serve_original_video(video_file=None):
         logger.error(f"Error serving video: {str(e)}")
         return jsonify({'error': f'Video serving failed: {str(e)}'}), 404
 
+@app.route('/generate-caption-stream', methods=['POST'])
+def generate_caption_stream():
+    """Stream real-time caption generation with chunk-by-chunk updates"""
+    request_id = str(int(time.time()))[-6:]
+    
+    # Extract parameters outside the generator to avoid request context issues
+    try:
+        data = request.get_json()
+        video_file = data.get('video_file', '')
+        fps_sampling = float(data.get('fps_sampling', 1.0))
+        chunk_size = int(data.get('chunk_size', 60))
+        prompt = data.get('prompt', 'Generate a detailed caption describing what happens in this video.')
+        processing_mode = data.get('processing_mode', 'sequential')
+        output_format = data.get('output_format', 'paragraph')
+    except Exception as e:
+        return jsonify({'error': f'Invalid request data: {str(e)}'}), 400
+    
+    def generate_caption_updates():
+        try:
+            logger.info(f"[{request_id}] === STREAMING CAPTION GENERATION START ===")
+            
+            manager = get_enhanced_manager()
+            if not manager:
+                yield f"data: {json.dumps({'error': 'Model manager not initialized'})}\n\n"
+                return
+            
+            # Send initial status
+            yield f"data: {json.dumps({'type': 'status', 'message': f'Starting caption generation for {video_file}', 'request_id': request_id})}\n\n"
+            
+            # Stream caption generation with real-time updates
+            video_path = os.path.join('/workspace/surveillance/inputs/videos', video_file)
+            
+            # Use the streaming generator version
+            for update in process_video_for_caption_streaming(
+                manager, video_path, video_file, fps_sampling, 
+                chunk_size, prompt, processing_mode, output_format, request_id
+            ):
+                yield f"data: {json.dumps(update)}\n\n"
+                
+        except Exception as e:
+            logger.error(f"[{request_id}] Streaming error: {str(e)}")
+            yield f"data: {json.dumps({'error': f'Streaming error: {str(e)}'})}\n\n"
+    
+    return Response(generate_caption_updates(), mimetype='text/event-stream')
+
+@app.route('/generate-caption', methods=['POST'])
+def generate_caption():
+    """Generate detailed caption for entire video using FPS-based sampling and chunks with real-time updates"""
+    request_id = str(int(time.time()))[-6:]
+    
+    try:
+        logger.info(f"[{request_id}] === CAPTION GENERATION REQUEST START ===")
+        
+        manager = get_enhanced_manager()
+        if not manager:
+            logger.error(f"[{request_id}] FAILED: Model manager not initialized")
+            return jsonify({'error': 'Model manager not initialized'}), 500
+            
+        data = request.get_json()
+        logger.info(f"[{request_id}] Caption request data: {json.dumps(data, indent=2)}")
+        
+        # Extract parameters
+        video_file = data.get('video_file', '')
+        fps_sampling = float(data.get('fps_sampling', 1.0))
+        chunk_size = int(data.get('chunk_size', 60))
+        prompt = data.get('prompt', 'Generate a detailed caption describing what happens in this video.')
+        processing_mode = data.get('processing_mode', 'sequential')
+        output_format = data.get('output_format', 'paragraph')
+        
+        logger.info(f"[{request_id}] Caption parameters:")
+        logger.info(f"[{request_id}]   - Video: {video_file}")
+        logger.info(f"[{request_id}]   - FPS: {fps_sampling}")
+        logger.info(f"[{request_id}]   - Chunk Size: {chunk_size}s")
+        logger.info(f"[{request_id}]   - Mode: {processing_mode}")
+        logger.info(f"[{request_id}]   - Format: {output_format}")
+        
+        # Validate video file
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        videos_dir = os.path.join(base_dir, "inputs/videos")
+        available_videos = [f for f in os.listdir(videos_dir) if f.endswith(('.mp4', '.avi', '.mov', '.mkv'))]
+        
+        if video_file not in available_videos:
+            logger.error(f"[{request_id}] VALIDATION ERROR: Video file {video_file} not found")
+            return jsonify({'error': f'Video file must be one of: {", ".join(available_videos)}'}), 400
+        
+        # Validate parameters
+        if fps_sampling < 0.1 or fps_sampling > 3.0:
+            return jsonify({'error': 'FPS sampling must be between 0.1 and 3.0'}), 400
+            
+        if chunk_size < 30 or chunk_size > 180:
+            return jsonify({'error': 'Chunk size must be between 30 and 180 seconds'}), 400
+        
+        # Get video path
+        video_path = os.path.join(base_dir, f"inputs/videos/{video_file}")
+        
+        if not os.path.exists(video_path):
+            logger.error(f"[{request_id}] FAILED: Video file not found at {video_path}")
+            return jsonify({'error': f'Video file not found: {video_file}'}), 404
+        
+        logger.info(f"[{request_id}] Starting caption generation...")
+        start_time = time.time()
+        
+        # Process video in chunks for caption generation with optimized performance
+        try:
+            caption_result = process_video_for_caption_optimized(
+                manager, video_path, video_file, fps_sampling, 
+                chunk_size, prompt, processing_mode, output_format, request_id
+            )
+            
+            processing_time = time.time() - start_time
+            
+            if caption_result['success']:
+                result = {
+                    'success': True,
+                    'caption': caption_result['caption'],
+                    'video_file': video_file,
+                    'fps_used': fps_sampling,
+                    'chunk_size': chunk_size,
+                    'processing_mode': processing_mode,
+                    'output_format': output_format,
+                    'frames_processed': caption_result['total_frames'],
+                    'chunks_processed': caption_result['chunks_processed'],
+                    'processing_time': f"{processing_time:.2f}s",
+                    'timestamp': datetime.now().isoformat(),
+                    'request_id': request_id,
+                    'chunk_details': caption_result.get('chunk_details', [])
+                }
+                
+                logger.info(f"[{request_id}] Caption generation successful")
+                logger.info(f"[{request_id}] Caption length: {len(caption_result['caption'])} characters")
+                logger.info(f"[{request_id}] Total processing time: {processing_time:.2f}s")
+                logger.info(f"[{request_id}] === CAPTION GENERATION REQUEST END ===")
+                
+                return jsonify(result)
+            else:
+                error_msg = caption_result['error']
+                # Check if this is a validation error (not a server error)
+                if 'FPS sampling too low' in error_msg:
+                    logger.warning(f"[{request_id}] Validation error: {error_msg}")
+                    return jsonify({'error': error_msg}), 400
+                else:
+                    logger.error(f"[{request_id}] Caption generation failed: {error_msg}")
+                    return jsonify({'error': error_msg}), 500
+                
+        except Exception as process_error:
+            processing_time = time.time() - start_time
+            logger.error(f"[{request_id}] Processing error after {processing_time:.2f}s: {str(process_error)}", exc_info=True)
+            # Ensure cleanup on any error
+            try:
+                if manager:
+                    manager._clear_preprocessed_data()
+                    logger.info(f"[{request_id}] Cleanup completed after error")
+            except:
+                pass
+            return jsonify({'error': f'Caption processing failed: {str(process_error)}'}), 500
+            
+    except Exception as e:
+        logger.error(f"[{request_id}] EXCEPTION: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Caption generation error: {str(e)}'}), 500
+
+def generate_caption_original():
+    """Original non-streaming caption generation (for fallback)"""
+    request_id = str(int(time.time()))[-6:]
+    
+    try:
+        logger.info(f"[{request_id}] === CAPTION GENERATION REQUEST START ===")
+        
+        manager = get_enhanced_manager()
+        if not manager:
+            logger.error(f"[{request_id}] FAILED: Model manager not initialized")
+            return jsonify({'error': 'Model manager not initialized'}), 500
+            
+        data = request.get_json()
+        logger.info(f"[{request_id}] Caption request data: {json.dumps(data, indent=2)}")
+        
+        # Extract parameters
+        video_file = data.get('video_file', '')
+        fps_sampling = float(data.get('fps_sampling', 1.0))
+        chunk_size = int(data.get('chunk_size', 60))
+        prompt = data.get('prompt', 'Generate a detailed caption describing what happens in this video.')
+        processing_mode = data.get('processing_mode', 'sequential')
+        output_format = data.get('output_format', 'paragraph')
+        
+        logger.info(f"[{request_id}] Caption parameters:")
+        logger.info(f"[{request_id}]   - Video: {video_file}")
+        logger.info(f"[{request_id}]   - FPS: {fps_sampling}")
+        logger.info(f"[{request_id}]   - Chunk Size: {chunk_size}s")
+        logger.info(f"[{request_id}]   - Mode: {processing_mode}")
+        logger.info(f"[{request_id}]   - Format: {output_format}")
+        
+        # Validate video file
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        videos_dir = os.path.join(base_dir, "inputs/videos")
+        available_videos = [f for f in os.listdir(videos_dir) if f.endswith(('.mp4', '.avi', '.mov', '.mkv'))]
+        
+        if video_file not in available_videos:
+            logger.error(f"[{request_id}] VALIDATION ERROR: Video file {video_file} not found")
+            return jsonify({'error': f'Video file must be one of: {", ".join(available_videos)}'}), 400
+        
+        # Validate parameters
+        if fps_sampling < 0.1 or fps_sampling > 3.0:
+            return jsonify({'error': 'FPS sampling must be between 0.1 and 3.0'}), 400
+            
+        if chunk_size < 30 or chunk_size > 180:
+            return jsonify({'error': 'Chunk size must be between 30 and 180 seconds'}), 400
+        
+        
+        # Get video path
+        video_path = os.path.join(base_dir, f"inputs/videos/{video_file}")
+        
+        if not os.path.exists(video_path):
+            logger.error(f"[{request_id}] FAILED: Video file not found at {video_path}")
+            return jsonify({'error': f'Video file not found: {video_file}'}), 404
+        
+        logger.info(f"[{request_id}] Starting caption generation...")
+        start_time = time.time()
+        
+        # Process video in chunks for caption generation
+        try:
+            caption_result = process_video_for_caption(
+                manager, video_path, video_file, fps_sampling, 
+                chunk_size, prompt, processing_mode, output_format, request_id
+            )
+            
+            processing_time = time.time() - start_time
+            
+            if caption_result['success']:
+                result = {
+                    'success': True,
+                    'caption': caption_result['caption'],
+                    'video_file': video_file,
+                    'fps_used': fps_sampling,
+                    'chunk_size': chunk_size,
+                    'processing_mode': processing_mode,
+                    'output_format': output_format,
+                    'frames_processed': caption_result['total_frames'],
+                    'chunks_processed': caption_result['chunks_processed'],
+                    'processing_time': f"{processing_time:.2f}s",
+                    'timestamp': datetime.now().isoformat(),
+                    'request_id': request_id
+                }
+                
+                logger.info(f"[{request_id}] Caption generation successful")
+                logger.info(f"[{request_id}] Caption length: {len(caption_result['caption'])} characters")
+                logger.info(f"[{request_id}] Total processing time: {processing_time:.2f}s")
+                logger.info(f"[{request_id}] === CAPTION GENERATION REQUEST END ===")
+                
+                return jsonify(result)
+            else:
+                error_msg = caption_result['error']
+                # Check if this is a validation error (not a server error)
+                if 'FPS sampling too low' in error_msg:
+                    logger.warning(f"[{request_id}] Validation error: {error_msg}")
+                    return jsonify({'error': error_msg}), 400
+                else:
+                    logger.error(f"[{request_id}] Caption generation failed: {error_msg}")
+                    return jsonify({'error': error_msg}), 500
+                
+        except Exception as process_error:
+            processing_time = time.time() - start_time
+            logger.error(f"[{request_id}] Processing error after {processing_time:.2f}s: {str(process_error)}", exc_info=True)
+            # Ensure cleanup on any error
+            try:
+                if manager:
+                    manager._clear_preprocessed_data()
+                    logger.info(f"[{request_id}] Cleanup completed after error")
+            except:
+                pass
+            return jsonify({'error': f'Caption processing failed: {str(process_error)}'}), 500
+            
+    except Exception as e:
+        logger.error(f"[{request_id}] EXCEPTION: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Caption generation error: {str(e)}'}), 500
+
+def process_video_segment(model_manager, video_path, prompt, num_frames, start_time, end_time, fps_sampling):
+    """Process a specific video segment using bound parameters"""
+    try:
+        import torch
+        
+        if not model_manager.model:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+        
+        # Calculate bound in seconds for the video segment
+        bound = (start_time, end_time)
+        
+        # Load and process video segment using bound parameter
+        pixel_values, num_patches_list = model_manager._load_video_for_inference(
+            video_path, 
+            bound=bound,  # This specifies the time segment
+            num_segments=num_frames, 
+            max_num=1,
+            fps_sampling=fps_sampling
+        )
+        
+        # Handle tensor dtype based on quantization settings
+        if model_manager.enable_8bit or model_manager.enable_4bit:
+            pixel_values = pixel_values.to(torch.float16).to(model_manager.model.device)
+        else:
+            pixel_values = pixel_values.to(torch.bfloat16).to(model_manager.model.device)
+        
+        video_prefix = "".join([f"Frame{i+1}: <image>\n" for i in range(len(num_patches_list))])
+        
+        # Prepare generation config
+        generation_config = dict(
+            do_sample=False,
+            temperature=0.0,
+            max_new_tokens=1024,
+            top_p=0.1,
+            num_beams=1
+        )
+        
+        # Build full question with video frames
+        question = video_prefix + prompt
+        
+        # Run actual inference
+        with torch.no_grad():
+            output, _ = model_manager.model.chat(
+                model_manager.tokenizer,
+                pixel_values,
+                question,
+                generation_config,
+                num_patches_list=num_patches_list,
+                history=None,
+                return_history=True
+            )
+        
+        return {
+            'success': True,
+            'response': output,
+            'text': output,
+            'frames_processed': len(num_patches_list),
+            'segment_start': start_time,
+            'segment_end': end_time
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'segment_start': start_time,
+            'segment_end': end_time
+        }
+
+def process_video_for_caption_streaming(manager, video_path, video_file, fps_sampling, chunk_size, prompt, processing_mode, output_format, request_id):
+    """Generate comprehensive caption using chunked processing with real-time streaming"""
+    try:
+        import cv2
+        import numpy as np
+        
+        # Get video info
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            yield {'type': 'error', 'message': 'Could not open video file'}
+            return
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = frame_count / fps if fps > 0 else 0
+        cap.release()
+        
+        # Yield video info
+        yield {'type': 'video_info', 'duration': duration, 'fps': fps, 'frames': frame_count}
+        
+        # Calculate processing parameters  
+        max_safe_frames = 160
+        total_needed_frames = int(fps_sampling * duration)
+        effective_chunks = int(np.ceil(duration / chunk_size))
+        
+        yield {'type': 'processing_info', 'total_chunks': effective_chunks, 'total_frames': total_needed_frames, 'max_safe_frames': max_safe_frames}
+        
+        chunk_captions = []
+        total_frames_processed = 0
+        previous_captions = []  # Track context for streaming too
+        
+        # Process all chunks with streaming
+        for chunk_idx in range(effective_chunks):
+            start_time = chunk_idx * chunk_size
+            end_time = min((chunk_idx + 1) * chunk_size, duration)
+            chunk_duration = end_time - start_time
+            chunk_frames = min(max_safe_frames, int(fps_sampling * chunk_duration))
+            
+            yield {'type': 'chunk_start', 'chunk': chunk_idx + 1, 'total_chunks': effective_chunks, 'start_time': start_time, 'end_time': end_time, 'frames': chunk_frames}
+            
+            try:
+                chunk_start_time = time.time()
+                
+                # Build context from previous chunks
+                context_prompt = ""
+                if previous_captions:
+                    recent_context = previous_captions[-3:] if len(previous_captions) >= 3 else previous_captions
+                    context_summary = " ".join(recent_context)
+                    if len(context_summary) > 500:
+                        context_summary = context_summary[-500:]
+                    context_prompt = f"\n\nPrevious context: {context_summary}\n\nNow, "
+                
+                # Combine prompt with context
+                if "concise" not in prompt.lower() and "brief" not in prompt.lower():
+                    chunk_prompt = f"{prompt}{context_prompt}for this {chunk_duration:.0f}-second segment ({start_time:.0f}-{end_time:.0f}s): Focus on what happens NEXT, continuing from the previous events. Describe the main actions and movements (3-5 sentences)."
+                else:
+                    chunk_prompt = f"{prompt}{context_prompt}segment {start_time:.0f}-{end_time:.0f} seconds."
+                
+                result = process_video_segment(
+                    manager.model_manager,
+                    video_path=video_path,
+                    prompt=chunk_prompt,
+                    num_frames=chunk_frames,
+                    start_time=start_time,
+                    end_time=end_time,
+                    fps_sampling=fps_sampling
+                )
+                
+                chunk_time = time.time() - chunk_start_time
+                
+                if result and ('text' in result or 'response' in result):
+                    caption_text = result.get('text', result.get('response', ''))
+                    
+                    # Check if we actually got text content
+                    if not caption_text or not caption_text.strip():
+                        error_msg = f"Empty caption returned. Result keys: {result.keys() if result else 'None'}"
+                        if result.get('error'):
+                            error_msg += f", Error: {result.get('error')}"
+                        yield {'type': 'chunk_error', 'chunk': chunk_idx + 1, 'message': error_msg}
+                        continue
+                        
+                    # Apply same length limit
+                    MAX_CHUNK_LENGTH = 500
+                    if len(caption_text) > MAX_CHUNK_LENGTH:
+                        truncate_point = caption_text[:MAX_CHUNK_LENGTH].rfind('. ')
+                        if truncate_point > 300:
+                            caption_text = caption_text[:truncate_point + 1]
+                        else:
+                            caption_text = caption_text[:MAX_CHUNK_LENGTH].rsplit(' ', 1)[0] + '...'
+                else:
+                    error_msg = f"No text/response in result. Keys: {result.keys() if result else 'None'}"
+                    if result and result.get('error'):
+                        error_msg += f", Error: {result.get('error')}"
+                    yield {'type': 'chunk_error', 'chunk': chunk_idx + 1, 'message': error_msg}
+                    continue
+                
+                # Format chunk caption with timestamp
+                if output_format == 'timestamped':
+                    formatted_chunk = f"**[{int(start_time//60)}:{int(start_time%60):02d} - {int(end_time//60)}:{int(end_time%60):02d}]** {caption_text}"
+                else:
+                    formatted_chunk = caption_text
+                
+                chunk_captions.append(formatted_chunk)
+                total_frames_processed += chunk_frames
+                
+                # Add to context for next chunks (use raw caption)
+                previous_captions.append(caption_text)
+                
+                # Yield chunk completion with the caption
+                yield {
+                    'type': 'chunk_complete', 
+                    'chunk': chunk_idx + 1, 
+                    'total_chunks': effective_chunks,
+                    'caption': formatted_chunk,
+                    'processing_time': chunk_time,
+                    'characters': len(caption_text),
+                    'frames': chunk_frames,
+                    'progress': ((chunk_idx + 1) / effective_chunks) * 100
+                }
+                
+                # Mandatory cleanup after every chunk to prevent slowdown
+                manager._clear_preprocessed_data()
+                yield {'type': 'cleanup', 'message': f'Cleaned cache after chunk {chunk_idx + 1} (preventing slowdown)'}
+                    
+            except Exception as chunk_error:
+                yield {'type': 'chunk_error', 'chunk': chunk_idx + 1, 'message': str(chunk_error)}
+                continue
+        
+        # Final processing and combination
+        if not chunk_captions:
+            yield {'type': 'error', 'message': 'No video chunks were successfully processed'}
+            return
+        
+        # Combine all captions based on output format
+        if output_format == 'timestamped':
+            final_caption = f"**Timestamped Video Caption ({video_file}):**\n\n" + "\n\n".join(chunk_captions)
+        elif output_format == 'detailed':
+            final_caption = f"**Detailed Video Analysis ({video_file}):**\n\n**Technical Details:**\n- Video Duration: {duration:.1f}s\n- Chunk Size: {chunk_size}s\n- Chunks Processed: {len(chunk_captions)}/{effective_chunks}\n- Frame Sampling: {fps_sampling} FPS ({total_frames_processed} total frames)\n- Processing Mode: {processing_mode}\n\n**Content Analysis by Time Segments:**\n\n" + "\n\n".join(chunk_captions)
+        elif output_format == 'summary':
+            all_content = " ".join([cap.split("**", 2)[-1] if "**" in cap else cap for cap in chunk_captions])
+            summary = all_content[:300] + "..." if len(all_content) > 300 else all_content
+            final_caption = f"**Video Summary + Details ({video_file}):**\n\n**Quick Summary:** {summary}\n\n**Detailed Timeline:**\n\n" + "\n\n".join(chunk_captions)
+        else:  # paragraph format
+            final_caption = f"**Video Caption ({video_file}):**\n\n"
+            clean_chunks = []
+            for chunk in chunk_captions:
+                if "**[" in chunk and "]**" in chunk:
+                    clean_content = chunk.split("]**", 1)[-1].strip()
+                else:
+                    clean_content = chunk.strip()
+                clean_chunks.append(clean_content)
+            final_caption += " ".join(clean_chunks)
+        
+        import html
+        final_caption = html.unescape(final_caption).replace('\x00', '').strip()
+        
+        # Final result
+        yield {
+            'type': 'complete',
+            'caption': final_caption,
+            'total_frames': total_frames_processed,
+            'chunks_processed': len(chunk_captions),
+            'success': True
+        }
+        
+    except Exception as e:
+        yield {'type': 'error', 'message': str(e)}
+
+def process_video_for_caption_optimized(manager, video_path, video_file, fps_sampling, chunk_size, prompt, processing_mode, output_format, request_id):
+    """Generate comprehensive caption using optimized chunked processing with performance improvements"""
+    try:
+        import cv2
+        import numpy as np
+        
+        # Get video info
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return {'success': False, 'error': 'Could not open video file'}
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = frame_count / fps if fps > 0 else 0
+        cap.release()
+        
+        logger.info(f"[{request_id}] Video info: {duration:.1f}s, {fps:.1f} FPS, {frame_count} frames")
+        
+        # Validate minimum frame count per chunk
+        frames_per_chunk = fps_sampling * chunk_size
+        if frames_per_chunk < 8:  # Minimum 8 frames per chunk
+            recommended_fps = max(1.0, 8 / chunk_size)
+            logger.warning(f"[{request_id}] Rejecting low frame count per chunk: {frames_per_chunk:.1f} frames")
+            return {
+                'success': False,
+                'error': f'FPS too low for {chunk_size}s chunks. Need {frames_per_chunk:.1f} frames per chunk, minimum 8. Try FPS {recommended_fps:.1f} or higher.'
+            }
+        
+        # Calculate processing parameters
+        max_safe_frames = 160  # Tested safe limit
+        total_needed_frames = int(fps_sampling * duration)
+        effective_chunks = int(np.ceil(duration / chunk_size))
+        
+        logger.info(f"[{request_id}] Processing strategy:")
+        logger.info(f"[{request_id}]   - Video duration: {duration:.1f}s")
+        logger.info(f"[{request_id}]   - Total chunks: {effective_chunks}")
+        logger.info(f"[{request_id}]   - FPS sampling: {fps_sampling} FPS")
+        logger.info(f"[{request_id}]   - Processing mode: {processing_mode}")
+        
+        chunk_captions = []
+        chunk_details = []
+        total_frames_processed = 0
+        
+        if total_needed_frames <= max_safe_frames:
+            # Single pass processing for short videos
+            logger.info(f"[{request_id}] Using single-pass processing: {total_needed_frames} frames <= {max_safe_frames} limit")
+            
+            try:
+                logger.info(f"[{request_id}] About to call process_video...")
+                result = process_video_segment(
+                    manager.model_manager,
+                    video_path=video_path,
+                    prompt=prompt,
+                    num_frames=total_needed_frames,
+                    start_time=0,
+                    end_time=duration,
+                    fps_sampling=fps_sampling
+                )
+                
+                if result and ('text' in result or 'response' in result):
+                    caption_text = result.get('text', result.get('response', ''))
+                    
+                    # Check if we actually got text content (same as chunk processing)
+                    if not caption_text or not caption_text.strip():
+                        logger.warning(f"[{request_id}] Single-pass returned empty caption text")
+                        logger.info(f"[{request_id}] Result keys: {result.keys() if result else 'None'}")
+                        logger.info(f"[{request_id}] Result success: {result.get('success', False)}")
+                        if result.get('error'):
+                            logger.error(f"[{request_id}] Error: {result.get('error')}")
+                        return {'success': False, 'error': f"Model returned empty caption. Error: {result.get('error', 'Unknown')}"}
+                    
+                    # Apply same length limit as chunks
+                    MAX_CAPTION_LENGTH = 500
+                    if len(caption_text) > MAX_CAPTION_LENGTH:
+                        truncate_point = caption_text[:MAX_CAPTION_LENGTH].rfind('. ')
+                        if truncate_point > 300:
+                            caption_text = caption_text[:truncate_point + 1]
+                        else:
+                            caption_text = caption_text[:MAX_CAPTION_LENGTH].rsplit(' ', 1)[0] + '...'
+                    
+                    chunk_captions = [caption_text]
+                    total_frames_processed = total_needed_frames
+                    effective_chunks = 1
+                    
+                    chunk_details.append({
+                        'chunk': 1,
+                        'start_time': 0,
+                        'end_time': duration,
+                        'frames': total_needed_frames,
+                        'caption_length': len(caption_text),
+                        'processing_time': result.get('processing_time', 0)
+                    })
+                    
+                    logger.info(f"[{request_id}] Single-pass processing completed: {len(caption_text)} characters")
+                else:
+                    error_msg = "No caption generated from video processing"
+                    if result:
+                        logger.info(f"[{request_id}] Result keys: {result.keys()}")
+                        if result.get('error'):
+                            error_msg = f"Processing error: {result.get('error')}"
+                    return {'success': False, 'error': error_msg}
+                    
+            except Exception as process_error:
+                logger.error(f"[{request_id}] Single-pass processing failed: {str(process_error)}")
+                return {'success': False, 'error': f'Video processing failed: {str(process_error)}'}
+        else:
+            # Multi-chunk processing for long videos
+            logger.info(f"[{request_id}] Video too long for single pass ({total_needed_frames} > {max_safe_frames})")
+            logger.info(f"[{request_id}] 🚀 Starting optimized processing of {effective_chunks} chunks...")
+            
+            # Track previous captions for context
+            previous_captions = []
+            
+            # Process all chunks with optimized cleanup
+            for chunk_idx in range(effective_chunks):
+                start_time = chunk_idx * chunk_size
+                end_time = min((chunk_idx + 1) * chunk_size, duration)
+                chunk_duration = end_time - start_time
+                chunk_frames = min(max_safe_frames, int(fps_sampling * chunk_duration))
+                
+                logger.info(f"[{request_id}] 📹 Processing chunk {chunk_idx + 1}/{effective_chunks}: {start_time:.1f}s - {end_time:.1f}s ({chunk_frames} frames)")
+                
+                try:
+                    chunk_start_time = time.time()
+                    
+                    # Build context from previous chunks (last 3)
+                    context_prompt = ""
+                    if previous_captions:
+                        # Get last 3 captions for context
+                        recent_context = previous_captions[-3:] if len(previous_captions) >= 3 else previous_captions
+                        context_summary = " ".join(recent_context)
+                        # Limit context length to avoid overwhelming the prompt
+                        if len(context_summary) > 500:
+                            context_summary = context_summary[-500:]
+                        context_prompt = f"\n\nPrevious context: {context_summary}\n\nNow, "
+                    
+                    # Combine user prompt with context and constraints
+                    if "concise" not in prompt.lower() and "brief" not in prompt.lower():
+                        # Add context and focus instruction
+                        chunk_prompt = f"{prompt}{context_prompt}for this {chunk_duration:.0f}-second segment ({start_time:.0f}-{end_time:.0f}s): Focus on what happens NEXT, continuing from the previous events. Describe the main actions and movements (3-5 sentences)."
+                    else:
+                        # User already requested concise output
+                        chunk_prompt = f"{prompt}{context_prompt}segment {start_time:.0f}-{end_time:.0f} seconds."
+                    
+                    result = process_video_segment(
+                        manager.model_manager,
+                        video_path=video_path,
+                        prompt=chunk_prompt,
+                        num_frames=chunk_frames,
+                        start_time=start_time,
+                        end_time=end_time,
+                        fps_sampling=fps_sampling
+                    )
+                    
+                    chunk_time = time.time() - chunk_start_time
+                    
+                    if result and ('text' in result or 'response' in result):
+                        caption_text = result.get('text', result.get('response', ''))
+                        
+                        # Check if we actually got text content
+                        if not caption_text or not caption_text.strip():
+                            logger.warning(f"[{request_id}] Chunk {chunk_idx + 1} returned empty caption text")
+                            # Log more details for debugging
+                            logger.info(f"[{request_id}] Result keys: {result.keys() if result else 'None'}")
+                            logger.info(f"[{request_id}] Result success: {result.get('success', False)}")
+                            if result.get('error'):
+                                logger.error(f"[{request_id}] Chunk error: {result.get('error')}")
+                            continue
+                        
+                        # Limit caption length to prevent excessive output
+                        MAX_CHUNK_LENGTH = 500  # Maximum characters per chunk (balanced for good detail)
+                        if len(caption_text) > MAX_CHUNK_LENGTH:
+                            # Find a good breakpoint (sentence end) near the limit
+                            truncate_point = caption_text[:MAX_CHUNK_LENGTH].rfind('. ')
+                            if truncate_point > 300:  # If we found a sentence end after 300 chars
+                                caption_text = caption_text[:truncate_point + 1]
+                            else:
+                                caption_text = caption_text[:MAX_CHUNK_LENGTH].rsplit(' ', 1)[0] + '...'
+                            logger.info(f"[{request_id}] Trimmed chunk {chunk_idx + 1} caption from original length to {len(caption_text)} chars")
+                    else:
+                        logger.warning(f"[{request_id}] Chunk {chunk_idx + 1} result missing text/response fields")
+                        if result:
+                            logger.info(f"[{request_id}] Result keys: {result.keys()}")
+                            if result.get('error'):
+                                logger.error(f"[{request_id}] Error: {result.get('error')}")
+                        continue
+                    
+                    # Format chunk caption with timestamp
+                    if output_format == 'timestamped':
+                        formatted_chunk = f"**[{int(start_time//60)}:{int(start_time%60):02d} - {int(end_time//60)}:{int(end_time%60):02d}]** {caption_text}"
+                    else:
+                        formatted_chunk = caption_text
+                    
+                    chunk_captions.append(formatted_chunk)
+                    total_frames_processed += chunk_frames
+                    
+                    # Add to context for next chunks (use raw caption, not formatted)
+                    previous_captions.append(caption_text)
+                    
+                    # Store chunk details for UI updates
+                    chunk_details.append({
+                        'chunk': chunk_idx + 1,
+                        'start_time': start_time,
+                        'end_time': end_time,
+                        'frames': chunk_frames,
+                        'caption': formatted_chunk,
+                        'caption_length': len(caption_text),
+                        'processing_time': chunk_time
+                    })
+                    
+                    # Show detailed chunk completion with text preview and timing
+                    text_preview = caption_text[:200] + "..." if len(caption_text) > 200 else caption_text
+                    logger.info(f"[{request_id}] ⚡ Chunk {chunk_idx + 1}/{effective_chunks} completed in {chunk_time:.1f}s")
+                    logger.info(f"[{request_id}]   📊 Stats: {len(caption_text)} characters, {chunk_frames} frames processed")
+                    logger.info(f"[{request_id}]   📝 Generated text: {text_preview}")
+                    logger.info(f"[{request_id}]   ⏱️  Cumulative time: {sum(cd['processing_time'] for cd in chunk_details):.1f}s total")
+                    
+                    # Mandatory cleanup after every chunk to prevent memory accumulation slowdown
+                    manager._clear_preprocessed_data()
+                    logger.info(f"[{request_id}] 🧹 Cleaned cache after chunk {chunk_idx + 1} (preventing slowdown)")
+                        
+                except Exception as chunk_error:
+                    logger.error(f"[{request_id}] Chunk {chunk_idx + 1} processing failed: {str(chunk_error)}")
+                    # Continue processing other chunks instead of failing completely
+                    continue
+            
+            # Check if any chunks were successfully processed
+            if not chunk_captions:
+                return {'success': False, 'error': 'No video chunks were successfully processed'}
+            
+            # Comprehensive processing summary with detailed metrics
+            total_processing_time = sum(cd.get('processing_time', 0) for cd in chunk_details)
+            avg_time_per_chunk = total_processing_time / len(chunk_details) if chunk_details else 0
+            total_characters = sum(cd.get('caption_length', 0) for cd in chunk_details)
+            
+            logger.info(f"[{request_id}] ✅ COMPLETED: Successfully processed {len(chunk_captions)}/{effective_chunks} chunks")
+            logger.info(f"[{request_id}] 📊 FINAL Processing Summary:")
+            logger.info(f"[{request_id}]   ⏱️  Total processing time: {total_processing_time:.1f}s")
+            logger.info(f"[{request_id}]   🏃 Average per chunk: {avg_time_per_chunk:.1f}s")
+            logger.info(f"[{request_id}]   📝 Total characters generated: {total_characters}")
+            logger.info(f"[{request_id}]   🎬 Total frames processed: {total_frames_processed}")
+            logger.info(f"[{request_id}]   🧹 Cleanup strategy: after every chunk (prevents slowdown)")
+            
+            # Log individual chunk performance details
+            logger.info(f"[{request_id}] 📋 Individual Chunk Performance:")
+            for cd in chunk_details:
+                time_range = f"{cd.get('start_time', 0):.1f}-{cd.get('end_time', 0):.1f}s"
+                proc_time = cd.get('processing_time', 0)
+                char_count = cd.get('caption_length', 0)
+                frame_count = cd.get('frames', 0)
+                chunk_num = cd.get('chunk', 0)
+                logger.info(f"[{request_id}]   Chunk {chunk_num}: {proc_time:.1f}s, {char_count} chars, {frame_count} frames ({time_range}) 🧹")
+        
+        # Combine chunk captions based on output format
+        if output_format == 'timestamped':
+            final_caption = f"**Timestamped Video Caption ({video_file}):**\n\n" + "\n\n".join(chunk_captions)
+        elif output_format == 'detailed':
+            final_caption = f"**Detailed Video Analysis ({video_file}):**\n\n**Technical Details:**\n- Video Duration: {duration:.1f}s\n- Chunk Size: {chunk_size}s\n- Chunks Processed: {len(chunk_captions)}/{effective_chunks}\n- Frame Sampling: {fps_sampling} FPS ({total_frames_processed} total frames)\n- Processing Mode: {processing_mode}\n\n**Content Analysis by Time Segments:**\n\n" + "\n\n".join(chunk_captions)
+        elif output_format == 'summary':
+            all_content = " ".join([cap.split("**", 2)[-1] if "**" in cap else cap for cap in chunk_captions])
+            summary = all_content[:300] + "..." if len(all_content) > 300 else all_content
+            final_caption = f"**Video Summary + Details ({video_file}):**\n\n**Quick Summary:** {summary}\n\n**Detailed Timeline:**\n\n" + "\n\n".join(chunk_captions)
+        else:  # paragraph format
+            final_caption = f"**Video Caption ({video_file}):**\n\n"
+            clean_chunks = []
+            for chunk in chunk_captions:
+                if "**[" in chunk and "]**" in chunk:
+                    clean_content = chunk.split("]**", 1)[-1].strip()
+                else:
+                    clean_content = chunk.strip()
+                clean_chunks.append(clean_content)
+            final_caption += " ".join(clean_chunks)
+        
+        # Final cleanup
+        import html
+        final_caption = html.unescape(final_caption).replace('\x00', '').strip()
+        
+        if not final_caption or final_caption.isspace():
+            return {'success': False, 'error': 'Generated caption is empty or invalid'}
+        
+        logger.info(f"[{request_id}] Final caption ready: {len(final_caption)} characters")
+        
+        # Final cleanup after all processing
+        try:
+            manager._clear_preprocessed_data()
+            logger.info(f"[{request_id}] Final cleanup completed")
+        except Exception as cleanup_error:
+            logger.warning(f"[{request_id}] Final cleanup warning: {str(cleanup_error)}")
+        
+        return {
+            'success': True,
+            'caption': final_caption,
+            'total_frames': total_frames_processed,
+            'chunks_processed': len(chunk_captions),
+            'chunk_details': chunk_details
+        }
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] Error in process_video_for_caption_optimized: {str(e)}")
+        # Cleanup even on error
+        try:
+            manager._clear_preprocessed_data()
+            logger.info(f"[{request_id}] Emergency cleanup completed")
+        except:
+            pass
+        return {'success': False, 'error': str(e)}
+
+def process_video_for_caption(manager, video_path, video_file, fps_sampling, chunk_size, prompt, processing_mode, output_format, request_id):
+    """Generate comprehensive caption using proper chunked InternVideo2.5 methodology"""
+    try:
+        import cv2
+        import numpy as np
+        
+        # Get video info
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return {'success': False, 'error': 'Could not open video file'}
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = frame_count / fps if fps > 0 else 0
+        cap.release()
+        
+        logger.info(f"[{request_id}] Video info: {duration:.1f}s, {fps:.1f} FPS, {frame_count} frames")
+        
+        # Validate minimum frame count per chunk
+        frames_per_chunk = fps_sampling * chunk_size
+        if frames_per_chunk < 8:  # Minimum 8 frames per chunk for meaningful video understanding
+            recommended_fps = max(1.0, 8 / chunk_size)
+            logger.warning(f"[{request_id}] Rejecting low frame count per chunk: {frames_per_chunk:.1f} frames")
+            return {
+                'success': False,
+                'error': f'FPS too low for {chunk_size}s chunks. Need {frames_per_chunk:.1f} frames per chunk, minimum 8. Try FPS {recommended_fps:.1f} or higher.'
+            }
+        
+        # Implement proper chunking strategy
+        total_chunks = int(np.ceil(duration / chunk_size))
+        
+        logger.info(f"[{request_id}] Chunking strategy:")
+        logger.info(f"[{request_id}]   - Video duration: {duration:.1f}s")
+        logger.info(f"[{request_id}]   - Chunk size: {chunk_size}s") 
+        logger.info(f"[{request_id}]   - Total chunks: {total_chunks}")
+        logger.info(f"[{request_id}]   - FPS sampling: {fps_sampling} FPS")
+        logger.info(f"[{request_id}]   - Processing mode: {processing_mode}")
+        
+        # Calculate safe processing parameters
+        # Limit to safe frame count for initial implementation
+        max_safe_frames = 160  # Tested safe limit
+        total_needed_frames = int(fps_sampling * duration)
+        
+        if total_needed_frames <= max_safe_frames:
+            # Single pass processing for short videos
+            logger.info(f"[{request_id}] Using single-pass processing: {total_needed_frames} frames <= {max_safe_frames} limit")
+            
+            try:
+                logger.info(f"[{request_id}] Manager type: {type(manager)}")
+                logger.info(f"[{request_id}] Has model_manager: {hasattr(manager, 'model_manager')}")
+                if hasattr(manager, 'model_manager'):
+                    logger.info(f"[{request_id}] Model manager type: {type(manager.model_manager)}")
+                    logger.info(f"[{request_id}] Model manager has process_video: {hasattr(manager.model_manager, 'process_video')}")
+                else:
+                    logger.error(f"[{request_id}] Manager does not have model_manager attribute!")
+                    return {'success': False, 'error': 'Manager does not have model_manager attribute'}
+                
+                logger.info(f"[{request_id}] About to clear processing cache...")
+                manager._clear_preprocessed_data()
+                
+                logger.info(f"[{request_id}] About to call process_video...")
+                result = process_video_segment(
+                    manager.model_manager,
+                    video_path=video_path,
+                    prompt=prompt,
+                    num_frames=total_needed_frames,
+                    start_time=0,
+                    end_time=duration,
+                    fps_sampling=fps_sampling
+                )
+                
+                logger.info(f"[{request_id}] process_video completed successfully")
+                
+                if result and 'text' in result:
+                    caption_text = result['text']
+                elif result and 'response' in result:
+                    caption_text = result['response'] 
+                else:
+                    return {'success': False, 'error': 'No caption generated from video processing'}
+                
+                chunk_captions = [caption_text]
+                total_frames_processed = total_needed_frames
+                effective_chunks = 1
+                
+                logger.info(f"[{request_id}] Single-pass processing completed: {len(caption_text)} characters")
+                
+            except Exception as process_error:
+                logger.error(f"[{request_id}] Single-pass processing failed: {str(process_error)}")
+                return {'success': False, 'error': f'Video processing failed: {str(process_error)}'}
+        else:
+            # Multi-chunk processing for long videos
+            logger.info(f"[{request_id}] Video too long for single pass ({total_needed_frames} > {max_safe_frames})")
+            logger.info(f"[{request_id}] Implementing full chunk-based processing with {chunk_size}s chunks...")
+            
+            chunk_captions = []
+            total_frames_processed = 0
+            effective_chunks = int(np.ceil(duration / chunk_size))
+            
+            # Process all chunks
+            logger.info(f"[{request_id}] Starting processing of {effective_chunks} chunks for {duration:.1f}s video...")
+            for chunk_idx in range(effective_chunks):
+                start_time = chunk_idx * chunk_size
+                end_time = min((chunk_idx + 1) * chunk_size, duration)
+                chunk_duration = end_time - start_time
+                chunk_frames = min(max_safe_frames, int(fps_sampling * chunk_duration))
+                
+                logger.info(f"[{request_id}] Processing chunk {chunk_idx + 1}/{effective_chunks}: {start_time:.1f}s - {end_time:.1f}s ({chunk_frames} frames)")
+                
+                try:
+                    # Process chunk with minimal cleanup
+                    chunk_start_time = time.time()
+                    
+                    # Create chunk-specific prompt
+                    # Combine user prompt with reasonable constraints
+                    if "concise" not in prompt.lower() and "brief" not in prompt.lower():
+                        # Add focus instruction if not already present
+                        chunk_prompt = f"{prompt}\n\nFor this {chunk_duration:.0f}-second segment: Focus on the main actions, events, and movements. Provide a clear but reasonably detailed description (3-5 sentences)."
+                    else:
+                        # User already requested concise output
+                        chunk_prompt = f"{prompt}\n\nSegment: {start_time:.0f}-{end_time:.0f} seconds."
+                    
+                    # Process video segment using ModelManager directly with proper bounds
+                    result = process_video_segment(
+                        manager.model_manager,
+                        video_path=video_path,
+                        prompt=chunk_prompt,
+                        num_frames=chunk_frames,
+                        start_time=start_time,
+                        end_time=end_time,
+                        fps_sampling=fps_sampling
+                    )
+                    
+                    chunk_time = time.time() - chunk_start_time
+                    
+                    if result and 'text' in result:
+                        caption_text = result['text']
+                    elif result and 'response' in result:
+                        caption_text = result['response']
+                    else:
+                        logger.warning(f"[{request_id}] Chunk {chunk_idx + 1} generated no caption, skipping...")
+                        continue
+                    
+                    # Format chunk caption with timestamp
+                    if output_format == 'timestamped':
+                        formatted_chunk = f"**[{int(start_time//60)}:{int(start_time%60):02d} - {int(end_time//60)}:{int(end_time%60):02d}]** {caption_text}"
+                    else:
+                        formatted_chunk = caption_text
+                    
+                    chunk_captions.append(formatted_chunk)
+                    total_frames_processed += chunk_frames
+                    
+                    logger.info(f"[{request_id}] ⚡ Chunk {chunk_idx + 1}/{effective_chunks} completed in {chunk_time:.1f}s: {len(caption_text)} characters")
+                    
+                    # Only clear GPU cache every few chunks to improve performance
+                    if (chunk_idx + 1) % 3 == 0:  # Every 3rd chunk
+                        manager._clear_preprocessed_data()
+                        logger.info(f"[{request_id}] 🧹 Cleaned cache after chunk {chunk_idx + 1}")
+                    
+                except Exception as chunk_error:
+                    logger.error(f"[{request_id}] Chunk {chunk_idx + 1} processing failed: {str(chunk_error)}")
+                    # Continue processing other chunks instead of failing completely
+                    continue
+            
+            # Check if any chunks were successfully processed
+            if not chunk_captions:
+                return {'success': False, 'error': 'No video chunks were successfully processed'}
+            
+            # Comprehensive processing summary with detailed metrics
+            total_processing_time = sum(cd.get('processing_time', 0) for cd in chunk_details)
+            avg_time_per_chunk = total_processing_time / len(chunk_details) if chunk_details else 0
+            total_characters = sum(cd.get('caption_length', 0) for cd in chunk_details)
+            
+            logger.info(f"[{request_id}] ✅ COMPLETED: Successfully processed {len(chunk_captions)}/{effective_chunks} chunks")
+            logger.info(f"[{request_id}] 📊 FINAL Processing Summary:")
+            logger.info(f"[{request_id}]   ⏱️  Total processing time: {total_processing_time:.1f}s")
+            logger.info(f"[{request_id}]   🏃 Average per chunk: {avg_time_per_chunk:.1f}s")
+            logger.info(f"[{request_id}]   📝 Total characters generated: {total_characters}")
+            logger.info(f"[{request_id}]   🎬 Total frames processed: {total_frames_processed}")
+            logger.info(f"[{request_id}]   🧹 Cleanup strategy: after every chunk (prevents slowdown)")
+            
+            # Log individual chunk performance details
+            logger.info(f"[{request_id}] 📋 Individual Chunk Performance:")
+            for cd in chunk_details:
+                time_range = f"{cd.get('start_time', 0):.1f}-{cd.get('end_time', 0):.1f}s"
+                proc_time = cd.get('processing_time', 0)
+                char_count = cd.get('caption_length', 0)
+                frame_count = cd.get('frames', 0)
+                chunk_num = cd.get('chunk', 0)
+                logger.info(f"[{request_id}]   Chunk {chunk_num}: {proc_time:.1f}s, {char_count} chars, {frame_count} frames ({time_range}) 🧹")
+            logger.info(f"[{request_id}] Video coverage: {(len(chunk_captions) * chunk_size):.1f}s / {duration:.1f}s")
+        
+        logger.info(f"[{request_id}] Processing completed with {len(chunk_captions)} segments")
+        
+        # Combine chunk captions based on output format
+        if output_format == 'timestamped':
+            final_caption = f"**Timestamped Video Caption ({video_file}):**\n\n"
+            final_caption += "\n\n".join(chunk_captions)
+            
+        elif output_format == 'detailed':
+            final_caption = f"**Detailed Video Analysis ({video_file}):**\n\n"
+            final_caption += f"**Technical Details:**\n"
+            final_caption += f"- Video Duration: {duration:.1f}s\n"
+            final_caption += f"- Chunk Size: {chunk_size}s\n"
+            final_caption += f"- Chunks Processed: {len(chunk_captions)}/{effective_chunks}\n"
+            final_caption += f"- Frame Sampling: {fps_sampling} FPS ({total_frames_processed} total frames)\n"
+            final_caption += f"- Processing Mode: {processing_mode}\n\n"
+            final_caption += f"**Content Analysis by Time Segments:**\n\n"
+            final_caption += "\n\n".join(chunk_captions)
+            
+        elif output_format == 'summary':
+            # Create summary from all chunks
+            all_content = " ".join([cap.split("**", 2)[-1] if "**" in cap else cap for cap in chunk_captions])
+            summary = all_content[:300] + "..." if len(all_content) > 300 else all_content
+            
+            final_caption = f"**Video Summary + Details ({video_file}):**\n\n"
+            final_caption += f"**Quick Summary:** {summary}\n\n"
+            final_caption += f"**Detailed Timeline:**\n\n"
+            final_caption += "\n\n".join(chunk_captions)
+            
+        else:  # paragraph format
+            final_caption = f"**Video Caption ({video_file}):**\n\n"
+            # Remove timestamps for paragraph format and create flowing narrative
+            clean_chunks = []
+            for chunk in chunk_captions:
+                if "**[" in chunk and "]**" in chunk:
+                    # Remove timestamp formatting for paragraph style
+                    clean_content = chunk.split("]**", 1)[-1].strip()
+                else:
+                    clean_content = chunk.strip()
+                clean_chunks.append(clean_content)
+            final_caption += " ".join(clean_chunks)
+        
+        # Final cleanup of the complete caption
+        import html
+        final_caption = html.unescape(final_caption)
+        
+        # Remove any remaining problematic characters that might break JSON
+        final_caption = final_caption.replace('\x00', '').strip()
+        
+        # Ensure the caption isn't empty
+        if not final_caption or final_caption.isspace():
+            return {'success': False, 'error': 'Generated caption is empty or invalid'}
+        
+        logger.info(f"[{request_id}] Final caption ready: {len(final_caption)} characters")
+        
+        # Cleanup GPU memory and clear video session after processing
+        logger.info(f"[{request_id}] Starting cleanup after caption generation...")
+        try:
+            manager._clear_preprocessed_data()
+            logger.info(f"[{request_id}] Video session cleared")
+        except Exception as cleanup_error:
+            logger.warning(f"[{request_id}] Cleanup warning: {str(cleanup_error)}")
+        
+        return {
+            'success': True,
+            'caption': final_caption,
+            'total_frames': total_frames_processed,
+            'chunks_processed': len(chunk_captions)
+        }
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] Error in process_video_for_caption: {str(e)}")
+        # Cleanup even on error
+        try:
+            manager._clear_preprocessed_data()
+            logger.info(f"[{request_id}] Emergency cleanup completed")
+        except:
+            pass
+        return {'success': False, 'error': str(e)}
+
+def calculate_video_chunks(duration, chunk_size, processing_mode):
+    """Calculate video chunks based on processing mode with performance limits"""
+    chunks = []
+    
+    # For very long videos, increase chunk size to limit total chunks
+    if duration > 600:  # 10+ minutes
+        chunk_size = max(chunk_size, 120)  # Min 2 minutes per chunk
+    elif duration > 300:  # 5+ minutes  
+        chunk_size = max(chunk_size, 90)   # Min 1.5 minutes per chunk
+    
+    if processing_mode == 'sequential':
+        # Non-overlapping chunks
+        current_time = 0
+        while current_time < duration:
+            end_time = min(current_time + chunk_size, duration)
+            chunks.append((current_time, end_time))
+            current_time = end_time
+            
+    elif processing_mode == 'overlapping':
+        # 25% overlap between chunks
+        overlap = chunk_size * 0.25
+        step = chunk_size - overlap  # How much to advance each time
+        current_time = 0
+        
+        while current_time < duration:
+            end_time = min(current_time + chunk_size, duration)
+            chunks.append((current_time, end_time))
+            
+            # Move to next chunk start
+            current_time += step
+            
+            # If the remaining duration is less than half a chunk, 
+            # merge it with the last chunk or skip
+            if current_time < duration and (duration - current_time) < (chunk_size * 0.5):
+                # Extend the last chunk to cover remaining duration
+                if chunks:
+                    chunks[-1] = (chunks[-1][0], duration)
+                break
+                
+    elif processing_mode == 'keyframe':
+        # Simulate keyframe detection with fixed intervals (in real implementation, this would use video analysis)
+        keyframe_interval = chunk_size * 0.8  # Slightly smaller chunks for key moments
+        current_time = 0
+        while current_time < duration:
+            end_time = min(current_time + keyframe_interval, duration)
+            chunks.append((current_time, end_time))
+            current_time = end_time
+            
+    elif processing_mode == 'adaptive':
+        # Adaptive sampling - smaller chunks at the beginning and end, larger in middle
+        if duration <= chunk_size:
+            chunks.append((0, duration))
+        else:
+            # Smaller chunks for intro/outro
+            intro_size = min(chunk_size * 0.7, duration * 0.2)
+            outro_size = min(chunk_size * 0.7, duration * 0.2)
+            
+            chunks.append((0, intro_size))
+            
+            # Larger chunks for middle section
+            middle_start = intro_size
+            middle_end = duration - outro_size
+            if middle_end > middle_start:
+                middle_duration = middle_end - middle_start
+                middle_chunks = max(1, int(middle_duration / chunk_size))
+                middle_chunk_size = middle_duration / middle_chunks
+                
+                for i in range(middle_chunks):
+                    start = middle_start + (i * middle_chunk_size)
+                    end = min(start + middle_chunk_size, middle_end)
+                    chunks.append((start, end))
+            
+            # Outro chunk
+            if outro_size > 0:
+                chunks.append((duration - outro_size, duration))
+    
+    return chunks
+
+@app.route('/caption-estimate', methods=['POST'])
+def get_caption_estimate():
+    """Get time estimation and chunk preview for caption generation"""
+    try:
+        data = request.get_json()
+        video_file = data.get('video_file', '')
+        fps_sampling = float(data.get('fps_sampling', 1.0))
+        chunk_size = int(data.get('chunk_size', 60))
+        processing_mode = data.get('processing_mode', 'sequential')
+        
+        if not video_file:
+            return jsonify({'error': 'Video file required'}), 400
+        
+        # Get video info
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        video_path = os.path.join(base_dir, f"inputs/videos/{video_file}")
+        
+        if not os.path.exists(video_path):
+            return jsonify({'error': 'Video file not found'}), 404
+        
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return jsonify({'error': 'Could not open video file'}), 400
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = frame_count / fps if fps > 0 else 0
+        cap.release()
+        
+        # Calculate chunks
+        chunks = calculate_video_chunks(duration, chunk_size, processing_mode)
+        
+        # Calculate processing estimates
+        total_frames = 0
+        chunk_details = []
+        
+        for i, (start_time, end_time) in enumerate(chunks):
+            chunk_duration = end_time - start_time
+            frames_for_chunk = min(160, int(fps_sampling * chunk_duration))
+            total_frames += frames_for_chunk
+            
+            chunk_details.append({
+                'chunk_number': i + 1,
+                'start_time': round(start_time, 1),
+                'end_time': round(end_time, 1),
+                'duration': round(chunk_duration, 1),
+                'frames': frames_for_chunk
+            })
+        
+        # Processing time estimation (4.9 frames/second)
+        processing_time_per_frame = 1.0 / 4.9
+        estimated_processing_time = total_frames * processing_time_per_frame
+        
+        # Add model loading time (16 seconds) if not already loaded
+        total_estimated_time = estimated_processing_time + 16
+        
+        result = {
+            'success': True,
+            'video_info': {
+                'filename': video_file,
+                'duration': round(duration, 1),
+                'fps': round(fps, 1),
+                'total_frames': frame_count
+            },
+            'processing_info': {
+                'chunks_count': len(chunks),
+                'total_frames_to_process': total_frames,
+                'fps_sampling': fps_sampling,
+                'chunk_size': chunk_size,
+                'processing_mode': processing_mode
+            },
+            'time_estimation': {
+                'processing_time_minutes': round(estimated_processing_time / 60, 1),
+                'processing_time_seconds': round(estimated_processing_time, 0),
+                'total_time_minutes': round(total_estimated_time / 60, 1),
+                'total_time_seconds': round(total_estimated_time, 0)
+            },
+            'chunk_details': chunk_details[:5]  # Show first 5 chunks as preview
+        }
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Caption estimation error: {str(e)}")
+        return jsonify({'error': f'Estimation failed: {str(e)}'}), 500
+
 @app.route('/video-snippet', methods=['POST'])
 def get_video_snippet_info():
     """Get video snippet information for direct streaming"""
@@ -642,6 +1933,9 @@ if __name__ == '__main__':
     print(f"🌐 Access at: http://localhost:8088")
     print(f"📊 Max capacity: 160 frames")
     print(f"💬 Features: Chat, Streaming, Video Caching")
+    
+    # Perform startup cleanup
+    startup_cleanup()
     
     app.run(
         host='0.0.0.0',

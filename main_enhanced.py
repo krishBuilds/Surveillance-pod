@@ -472,10 +472,12 @@ class EnhancedModelManager:
             logger.info(f"Clearing chat history ({len(self.chat_history)} messages)")
             self.chat_history.clear()
         
-        # Clear GPU memory
-        if self.model_manager and self.model_manager.device == "cuda":
-            torch.cuda.empty_cache()
-            logger.info("GPU memory cache cleared")
+        # Clear model's processing cache (embeddings, tokens) while keeping model alive
+        if self.model_manager:
+            try:
+                self.model_manager.clear_processing_cache()
+            except Exception as e:
+                logger.warning(f"Model cache cleanup warning: {e}")
         
         logger.info("Previous video session completely cleared")
     
