@@ -1,0 +1,1489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>InternVideo2.5 - AI Video Analysis Suite</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 50%, #dee2e6 100%);
+            min-height: 100vh;
+            color: #212529;
+            overflow-x: hidden;
+        }
+        
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: 
+                radial-gradient(circle at 20% 80%, rgba(0, 123, 255, 0.05) 0%, transparent 50%),
+                radial-gradient(circle at 80% 20%, rgba(108, 117, 125, 0.03) 0%, transparent 50%),
+                radial-gradient(circle at 40% 40%, rgba(0, 123, 255, 0.02) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .container {
+            max-width: 100%;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+        }
+
+
+
+
+        .main-content {
+            display: flex;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .left-panel {
+            width: 500px;
+            background: rgba(248, 249, 250, 0.9);
+            border-right: 1px solid rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            backdrop-filter: blur(10px);
+        }
+
+        .right-panel {
+            flex: 1;
+            background: rgba(248, 249, 250, 0.9);
+            display: flex;
+            flex-direction: column;
+            backdrop-filter: blur(10px);
+        }
+
+        .panel-header {
+            padding: 20px 25px 15px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+            position: relative;
+        }
+
+        .panel-header::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background: linear-gradient(180deg, #00d4ff, #8338ec);
+            border-radius: 0 0 15px 0;
+        }
+
+        .panel-title {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: rgba(33, 37, 41, 0.9);
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .video-processing {
+            padding: 15px 20px;
+            flex: 0 0 auto;
+            height: 42vh;
+            min-height: 42vh;
+            overflow-y: auto;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+        }
+        
+        .reference-video-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            height: calc(100vh - 42vh);
+        }
+        
+        
+        .reference-video-content {
+            padding: 15px 15px 0px 15px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            align-items: center;
+            text-align: center;
+            height: 100%;
+            overflow: hidden;
+        }
+        
+        .video-placeholder {
+            color: rgba(108, 117, 125, 0.8);
+            font-style: italic;
+        }
+        
+        .video-placeholder i {
+            font-size: 3em;
+            margin-bottom: 15px;
+            color: rgba(108, 117, 125, 0.5);
+        }
+        
+        #reference-video {
+            width: 100%;
+            max-width: 100%;
+            border-radius: 8px;
+            background: #000;
+            display: block;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+        }
+        
+        #reference-video:focus {
+            outline: 2px solid #00d4ff;
+            outline-offset: 2px;
+        }
+        
+        #video-info {
+            margin-top: 10px;
+            font-size: 12px;
+            color: rgba(108, 117, 125, 0.8);
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            justify-content: center;
+        }
+
+        .form-group {
+            margin-bottom: 12px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: rgba(33, 37, 41, 0.9);
+            font-size: 0.95em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        input[type="number"] {
+            width: 100%;
+            padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(0, 0, 0, 0.15);
+            border-radius: 6px;
+            font-size: 13px;
+            color: rgba(33, 37, 41, 0.9);
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+
+        input[type="number"]:focus {
+            outline: none;
+            border-color: #0d6efd;
+            box-shadow: 0 0 15px rgba(13, 110, 253, 0.2);
+            background: rgba(255, 255, 255, 0.95);
+        }
+
+        input::placeholder {
+            color: rgba(108, 117, 125, 0.7);
+        }
+
+        .input-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        .process-btn {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #0d6efd 0%, #6f42c1 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .process-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(13, 110, 253, 0.4);
+        }
+
+        .process-btn:disabled {
+            background: rgba(108, 117, 125, 0.5);
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .processing-status {
+            padding: 12px;
+            margin-top: 15px;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 6px;
+            border-left: 4px solid #0d6efd;
+            display: none;
+            min-height: 80px;
+        }
+
+        .processing-status.show {
+            display: block;
+        }
+
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .chat-header {
+            padding: 20px 25px 15px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+            position: relative;
+        }
+
+        .chat-header::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background: linear-gradient(180deg, #00ff88, #00d4ff);
+            border-radius: 0 0 15px 0;
+        }
+
+        .chat-title {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: rgba(33, 37, 41, 0.9);
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            min-height: 0;
+        }
+
+        .message {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+            max-width: 85%;
+        }
+
+        .user-message {
+            align-self: flex-end;
+            flex-direction: row-reverse;
+        }
+
+        .bot-message {
+            align-self: flex-start;
+        }
+
+        .message-avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+
+        .user-message .message-avatar {
+            background: linear-gradient(135deg, #00d4ff, #8338ec);
+        }
+
+        .bot-message .message-avatar {
+            background: linear-gradient(135deg, #00ff88, #00d4ff);
+        }
+
+        .message-content {
+            background: rgba(255, 255, 255, 0.8);
+            padding: 12px 16px;
+            border-radius: 18px;
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            color: rgba(33, 37, 41, 0.9);
+            line-height: 1.5;
+            font-size: 14px;
+        }
+
+        .user-message .message-content {
+            background: linear-gradient(135deg, rgba(13, 110, 253, 0.2), rgba(111, 66, 193, 0.2));
+            border-color: rgba(13, 110, 253, 0.3);
+        }
+
+        .bot-message .message-content {
+            background: rgba(248, 249, 250, 0.9);
+        }
+
+        .message-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 8px;
+            margin-top: 12px;
+            font-size: 11px;
+        }
+
+        .message-metric {
+            background: rgba(255, 255, 255, 0.7);
+            padding: 6px 8px;
+            border-radius: 8px;
+            text-align: center;
+            border: 1px solid rgba(0, 0, 0, 0.1);
+        }
+
+        .message-metric-value {
+            font-weight: 600;
+            color: #0d6efd;
+            font-size: 12px;
+        }
+
+        .message-metric-label {
+            color: rgba(108, 117, 125, 0.8);
+            margin-top: 2px;
+        }
+        
+        .temporal-timestamps {
+            margin-top: 15px;
+            padding: 12px;
+            background: rgba(13, 110, 253, 0.1);
+            border-radius: 8px;
+            border: 1px solid rgba(13, 110, 253, 0.2);
+        }
+        
+        .temporal-timestamps h5 {
+            margin: 0 0 10px 0;
+            color: #0d6efd;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .timestamp-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+        }
+        
+        .timestamp-item:last-child {
+            border-bottom: none;
+        }
+        
+        .timestamp-time {
+            font-weight: 600;
+            color: #20c997;
+            font-family: monospace;
+        }
+        
+        .timestamp-description {
+            flex: 1;
+            margin: 0 10px;
+            font-size: 12px;
+            color: rgba(33, 37, 41, 0.8);
+        }
+        
+        .snippet-btn {
+            padding: 4px 8px;
+            background: rgba(111, 66, 193, 0.3);
+            border: 1px solid rgba(111, 66, 193, 0.5);
+            color: #6f42c1;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.3s ease;
+            text-decoration: none;
+        }
+        
+        .snippet-btn:hover {
+            background: rgba(111, 66, 193, 0.5);
+            color: white;
+            transform: scale(1.05);
+        }
+        
+        .video-snippets {
+            margin-top: 15px;
+            display: grid;
+            gap: 10px;
+        }
+        
+        .video-snippet {
+            background: rgba(248, 249, 250, 0.9);
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid rgba(0, 0, 0, 0.1);
+        }
+        
+        .snippet-header {
+            padding: 8px 12px;
+            background: rgba(13, 110, 253, 0.1);
+            border-bottom: 1px solid rgba(13, 110, 253, 0.2);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 12px;
+        }
+        
+        .snippet-timestamp {
+            color: #0d6efd;
+            font-weight: 600;
+            font-family: monospace;
+        }
+        
+        .snippet-description {
+            color: rgba(33, 37, 41, 0.7);
+            flex: 1;
+            margin: 0 10px;
+            font-size: 11px;
+        }
+        
+        .video-snippet video {
+            width: 100%;
+            height: auto;
+            max-height: 200px;
+            background: #000;
+        }
+        
+        .temporal-options {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 10px;
+            padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: 6px;
+            font-size: 12px;
+        }
+        
+        .temporal-option {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .temporal-option input[type="checkbox"] {
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(0, 0, 0, 0.3);
+            border-radius: 3px;
+            cursor: pointer;
+            position: relative;
+        }
+        
+        .temporal-option input[type="checkbox"]:checked {
+            background: #0d6efd;
+            border-color: #0d6efd;
+        }
+        
+        .temporal-option input[type="checkbox"]:checked::after {
+            content: '✓';
+            position: absolute;
+            top: -2px;
+            left: 2px;
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        
+        .temporal-option label {
+            margin: 0;
+            font-size: 12px;
+            color: rgba(33, 37, 41, 0.8);
+            cursor: pointer;
+        }
+
+        .chat-input-container {
+            padding: 20px;
+            border-top: 1px solid rgba(0, 0, 0, 0.1);
+            flex-shrink: 0;
+        }
+
+        .chat-disabled {
+            text-align: center;
+            padding: 40px 20px;
+            color: rgba(108, 117, 125, 0.8);
+            font-style: italic;
+        }
+
+        .chat-input-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .chat-input-row input {
+            flex: 1;
+            padding: 12px 16px;
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(0, 0, 0, 0.15);
+            border-radius: 25px;
+            font-size: 14px;
+            color: rgba(33, 37, 41, 0.9);
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+
+        .chat-input-row input:focus {
+            outline: none;
+            border-color: #0d6efd;
+            box-shadow: 0 0 15px rgba(13, 110, 253, 0.2);
+            background: rgba(255, 255, 255, 0.95);
+        }
+
+        .send-btn {
+            width: 45px;
+            height: 45px;
+            background: linear-gradient(135deg, #0d6efd, #6f42c1);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+
+        .send-btn:hover:not(:disabled) {
+            transform: scale(1.1);
+            box-shadow: 0 5px 15px rgba(13, 110, 253, 0.4);
+        }
+
+        .send-btn:disabled {
+            background: rgba(108, 117, 125, 0.5);
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .chat-controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            justify-content: center;
+        }
+
+        .control-btn {
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.7);
+            color: rgba(33, 37, 41, 0.8);
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .control-btn:hover {
+            background: rgba(13, 110, 253, 0.2);
+            border-color: rgba(13, 110, 253, 0.4);
+            color: #0d6efd;
+        }
+
+        .typing-indicator {
+            display: none;
+            padding: 15px;
+            text-align: center;
+            color: rgba(108, 117, 125, 0.8);
+            font-style: italic;
+        }
+
+        .typing-dots {
+            display: inline-block;
+            animation: typing 1.5s infinite;
+        }
+
+        @keyframes typing {
+            0%, 60%, 100% { opacity: 0.3; }
+            30% { opacity: 1; }
+        }
+
+        .streaming-text {
+            background: linear-gradient(90deg, #0d6efd, #6f42c1, #0d6efd);
+            background-size: 200% 100%;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            animation: shimmer 2s linear infinite;
+        }
+
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            width: 30px;
+            height: 30px;
+            border: 3px solid rgba(0, 0, 0, 0.1);
+            border-top: 3px solid #0d6efd;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: rgba(231, 76, 60, 0.2);
+            border: 1px solid rgba(231, 76, 60, 0.5);
+            color: #ff6b6b;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            display: none;
+            font-size: 14px;
+        }
+
+        .help-text {
+            font-size: 0.8em;
+            color: rgba(108, 117, 125, 0.8);
+            margin-top: 3px;
+            line-height: 1.2;
+        }
+
+        @media (max-width: 1024px) {
+            .main-content {
+                flex-direction: column;
+            }
+            
+            .left-panel {
+                width: 100%;
+                max-height: 45vh;
+            }
+            
+            .video-processing {
+                max-height: 25vh;
+                padding: 10px 15px;
+            }
+
+            .input-row {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="main-content">
+            <!-- Left Panel - Video Processing -->
+            <div class="left-panel">
+                <div class="panel-header">
+                    <h2 class="panel-title">
+                        <span class="icon">⚙️</span>
+                        Video Processing
+                    </h2>
+                </div>
+                
+                <div class="video-processing">
+                    <form id="process-form">
+                        <div class="form-group">
+                            <label for="video_file">
+                                <i class="fas fa-video"></i>
+                                Video File:
+                            </label>
+                            <select id="video_file" name="video_file" style="width: 100%; padding: 8px 12px; background: rgba(255, 255, 255, 0.9); border: 1px solid rgba(0, 0, 0, 0.15); border-radius: 6px; font-size: 13px; color: rgba(33, 37, 41, 0.9); font-family: inherit;">
+                                <option value="">Loading videos...</option>
+                            </select>
+                            <div class="help-text">Choose video file to analyze</div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="num_frames">
+                                <i class="fas fa-film"></i>
+                                Frame Count:
+                            </label>
+                            <input type="number" id="num_frames" name="num_frames" value="120" min="1" max="160" required>
+                            <div class="help-text">Total frames to extract (1-160). These will be distributed evenly</div>
+                        </div>
+
+                        <div class="input-row">
+                            <div class="form-group">
+                                <label for="fps_sampling">
+                                    <i class="fas fa-clock"></i>
+                                    Sample Rate (FPS):
+                                </label>
+                                <input type="number" id="fps_sampling" name="fps_sampling" step="0.1" min="0.1" max="5.0" placeholder="Even">
+                                <div class="help-text">Extract at N frames/sec (e.g., 1.0 = 1 FPS)</div>
+                            </div>
+                            <div class="form-group">
+                                <label for="time_bound">
+                                    <i class="fas fa-stopwatch"></i>
+                                    Duration Limit (s):
+                                </label>
+                                <input type="number" id="time_bound" name="time_bound" min="1" max="600" placeholder="Full video">
+                                <div class="help-text">Only analyze first N seconds (frames distributed within)</div>
+                            </div>
+                        </div>
+
+                        <button type="submit" class="process-btn" id="process-btn">
+                            <i class="fas fa-play"></i> Process Video
+                        </button>
+                    </form>
+
+                    <div class="processing-status" id="processing-status">
+                        <div class="loading" id="loading">
+                            <div class="spinner"></div>
+                            <p id="loading-text">Processing video...</p>
+                        </div>
+                        <div id="process-result" style="display: none;">
+                            <h4 style="color: #00d4ff; margin-bottom: 10px;">✅ Video Processed Successfully!</h4>
+                            <div id="process-info"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="error" id="error-message"></div>
+                </div>
+                
+                <!-- Reference Video Section -->
+                <div class="reference-video-section">
+                    <div class="reference-video-content">
+                        <div class="video-placeholder" id="video-placeholder" style="display: none;">
+                            <i class="fas fa-video"></i>
+                            <p>Video snippets will appear here</p>
+                            <p style="margin-top: 8px; font-size: 11px;">Ask temporal questions like "when does X appear?" to generate clips</p>
+                        </div>
+                        
+                        <video id="reference-video" controls style="display: block;" preload="metadata" controlsList="nodownload">
+                            <source id="video-source" src="/video-stream/bigbuckbunny.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                        
+                        <div id="video-info" style="display: none;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Panel - Chat Interface -->
+            <div class="right-panel">
+                <div class="chat-header">
+                    <h2 class="chat-title">
+                        <span class="icon">💬</span>
+                        Video Analysis Chat
+                        <span id="chat-status" style="font-size: 0.8em; color: rgba(108,117,125,0.8); margin-left: auto;">Process video to start</span>
+                    </h2>
+                </div>
+                
+                <div class="chat-container">
+                    <div class="chat-messages" id="chat-messages">
+                        <div class="chat-disabled" id="chat-disabled">
+                            <i class="fas fa-video" style="font-size: 3em; margin-bottom: 20px; color: rgba(108,117,125,0.5);"></i>
+                            <p>Process the video first to start chatting about its content.</p>
+                            <p style="margin-top: 10px;">You can then ask questions like:</p>
+                            <ul style="margin-top: 15px; text-align: left; max-width: 320px; margin-left: auto; margin-right: auto;">
+                                <li>• "Describe the main characters"</li>
+                                <li>• "When does the bird appear?"</li>
+                                <li>• "What happens around 30 seconds?"</li>
+                                <li>• "Show me when the action starts"</li>
+                                <li>• "Analyze the visual style"</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class="typing-indicator" id="typing-indicator">
+                        <span class="typing-dots">AI is thinking...</span>
+                    </div>
+                    
+                    <div class="chat-input-container" id="chat-input-container" style="display: none;">
+                        <div class="temporal-options">
+                            <div class="temporal-option">
+                                <input type="checkbox" id="enable-temporal" checked>
+                                <label for="enable-temporal">🕒 Temporal Analysis</label>
+                            </div>
+                            <div class="temporal-option">
+                                <input type="checkbox" id="auto-snippets">
+                                <label for="auto-snippets">🎬 Auto-generate Video Clips</label>
+                            </div>
+                        </div>
+                        
+                        <div class="chat-input-row">
+                            <input type="text" id="chat-input" placeholder="Ask me anything about the video..." disabled>
+                            <button type="button" id="send-btn" class="send-btn" disabled>
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </div>
+                        
+                        <div class="chat-controls" id="chat-controls">
+                            <button type="button" id="clear-chat-btn" class="control-btn">
+                                <i class="fas fa-trash"></i> Clear Chat
+                            </button>
+                            <button type="button" id="new-process-btn" class="control-btn">
+                                <i class="fas fa-refresh"></i> New Video
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isVideoProcessed = false;
+
+        // Load system status on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadSystemStatus();
+            initializeVideoPlayer();
+            loadAvailableVideos();
+        });
+
+        function loadSystemStatus() {
+            fetch('/status')
+                .then(response => response.json())
+                .then(data => {
+                    // Status checked but no UI update needed since status bar is removed
+                })
+                .catch(error => {
+                    console.error('Status check failed:', error);
+                });
+        }
+
+        function loadAvailableVideos() {
+            fetch('/available-videos')
+                .then(response => response.json())
+                .then(data => {
+                    const videoSelect = document.getElementById('video_file');
+                    if (data.videos && videoSelect) {
+                        // Clear loading option
+                        videoSelect.innerHTML = '';
+                        
+                        // Add video options
+                        data.videos.forEach(video => {
+                            const option = document.createElement('option');
+                            option.value = video.filename;
+                            option.textContent = `${video.filename} (${video.duration}, ${video.size_mb}MB)`;
+                            videoSelect.appendChild(option);
+                        });
+                        
+                        // Set default selection (first video or bigbuckbunny if available)
+                        const defaultVideo = data.videos.find(v => v.filename === 'bigbuckbunny.mp4') || data.videos[0];
+                        if (defaultVideo) {
+                            videoSelect.value = defaultVideo.filename;
+                            updateVideoSource(defaultVideo.filename);
+                        }
+                        
+                        // Attach change event listener after dropdown is populated
+                        videoSelect.addEventListener('change', function(e) {
+                            const selectedVideo = e.target.value;
+                            console.log(`Video selection changed to: ${selectedVideo}`);
+                            updateVideoSource(selectedVideo);
+                        });
+                        
+                        console.log(`Loaded ${data.videos.length} videos`);
+                    }
+                })
+                .catch(error => {
+                    console.error('Failed to load available videos:', error);
+                    const videoSelect = document.getElementById('video_file');
+                    if (videoSelect) {
+                        videoSelect.innerHTML = '<option value="">Error loading videos</option>';
+                    }
+                });
+        }
+
+        function initializeVideoPlayer() {
+            const videoPlayer = document.getElementById('reference-video');
+            const videoInfo = document.getElementById('video-info');
+            
+            if (videoPlayer) {
+                // Add event listeners for video player
+                videoPlayer.addEventListener('loadstart', function() {
+                    console.log('Video loading started...');
+                });
+                
+                videoPlayer.addEventListener('loadedmetadata', function() {
+                    console.log('Video metadata loaded');
+                    console.log(`Video duration: ${videoPlayer.duration}s`);
+                    console.log(`Video dimensions: ${videoPlayer.videoWidth}x${videoPlayer.videoHeight}`);
+                    
+                    if (videoInfo) {
+                        videoInfo.innerHTML = `<i class="fas fa-info-circle"></i> Video ready: ${Math.floor(videoPlayer.duration / 60)}:${(videoPlayer.duration % 60).toFixed(0).padStart(2, '0')} • ${videoPlayer.videoWidth}x${videoPlayer.videoHeight}`;
+                        videoInfo.style.color = '#0d6efd';
+                        videoInfo.style.display = 'block';
+                    }
+                });
+                
+                videoPlayer.addEventListener('error', function(e) {
+                    console.error('Video error:', e);
+                    if (videoInfo) {
+                        videoInfo.innerHTML = `<i class="fas fa-exclamation-triangle"></i> Video loading error`;
+                        videoInfo.style.color = '#dc3545';
+                        videoInfo.style.display = 'block';
+                    }
+                });
+                
+                videoPlayer.addEventListener('canplaythrough', function() {
+                    console.log('Video can play through');
+                });
+                
+                // Force load the video
+                videoPlayer.load();
+            }
+        }
+
+        function updateVideoSource(videoFile) {
+            const videoPlayer = document.getElementById('reference-video');
+            const videoSource = document.getElementById('video-source');
+            const videoInfo = document.getElementById('video-info');
+            
+            if (videoPlayer && videoSource && videoFile) {
+                console.log(`Updating video source to: ${videoFile}`);
+                
+                // Update the video source
+                videoSource.src = `/video-stream/${videoFile}`;
+                
+                // Show loading state
+                if (videoInfo) {
+                    videoInfo.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Loading ${videoFile}...`;
+                    videoInfo.style.color = '#0d6efd';
+                    videoInfo.style.display = 'block';
+                }
+                
+                // Reload the video
+                videoPlayer.load();
+                
+                // Add event listener for when video loads successfully
+                videoPlayer.onloadedmetadata = function() {
+                    console.log(`Video ${videoFile} loaded successfully`);
+                    console.log(`Duration: ${videoPlayer.duration}s, Dimensions: ${videoPlayer.videoWidth}x${videoPlayer.videoHeight}`);
+                    
+                    if (videoInfo) {
+                        const duration = Math.floor(videoPlayer.duration / 60) + ':' + (videoPlayer.duration % 60).toFixed(0).padStart(2, '0');
+                        videoInfo.innerHTML = `<i class="fas fa-check-circle"></i> ${videoFile} ready: ${duration} • ${videoPlayer.videoWidth}x${videoPlayer.videoHeight}`;
+                        videoInfo.style.color = '#20c997';
+                    }
+                };
+                
+                // Handle video load errors
+                videoPlayer.onerror = function(e) {
+                    console.error(`Error loading video ${videoFile}:`, e);
+                    if (videoInfo) {
+                        videoInfo.innerHTML = `<i class="fas fa-exclamation-triangle"></i> Error loading ${videoFile}`;
+                        videoInfo.style.color = '#dc3545';
+                    }
+                };
+            }
+        }
+
+        // Handle video file selection change - will be attached after videos load
+
+        // Handle video processing form
+        document.getElementById('process-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(e.target);
+            const data = {
+                video_file: formData.get('video_file'),
+                num_frames: parseInt(formData.get('num_frames')),
+                fps_sampling: formData.get('fps_sampling') || null,
+                time_bound: formData.get('time_bound') || null
+            };
+
+            processVideo(data);
+        });
+
+        // Handle chat input
+        document.getElementById('chat-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendChatMessage();
+            }
+        });
+        
+        document.getElementById('send-btn').addEventListener('click', sendChatMessage);
+        
+        // Clear chat button
+        document.getElementById('clear-chat-btn').addEventListener('click', function() {
+            clearChatHistory();
+        });
+        
+        // New process button
+        document.getElementById('new-process-btn').addEventListener('click', function() {
+            resetInterface();
+        });
+
+        function processVideo(data) {
+            // Show processing state
+            document.getElementById('processing-status').classList.add('show');
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('process-result').style.display = 'none';
+            document.getElementById('error-message').style.display = 'none';
+            document.getElementById('process-btn').disabled = true;
+            document.getElementById('process-btn').innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+
+            fetch('/process-video', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(result => {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('process-btn').disabled = false;
+                document.getElementById('process-btn').innerHTML = '<i class="fas fa-play"></i> Process Video';
+
+                if (result.error) {
+                    showError(result.error);
+                } else {
+                    showProcessResult(result);
+                    enableChat();
+                }
+            })
+            .catch(error => {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('process-btn').disabled = false;
+                document.getElementById('process-btn').innerHTML = '<i class="fas fa-play"></i> Process Video';
+                showError('Network error: ' + error.message);
+            });
+        }
+
+        function showProcessResult(result) {
+            document.getElementById('process-result').style.display = 'block';
+            
+            // Format processing time
+            const processingTime = result.preprocessing_time || result.processing_time;
+            const processingTimeStr = processingTime ? 
+                (processingTime < 60 ? 
+                    `${processingTime.toFixed(1)}s` : 
+                    `${Math.floor(processingTime / 60)}m ${(processingTime % 60).toFixed(1)}s`) : 
+                'N/A';
+                
+            // Calculate effective FPS (frames processed per second of processing time)
+            const effectiveFPS = (processingTime && result.frames_processed) ? 
+                (result.frames_processed / processingTime).toFixed(2) : 'N/A';
+            
+            document.getElementById('process-info').innerHTML = `
+                <p><strong>Frames Processed:</strong> ${result.frames_processed || 'N/A'}</p>
+                <p><strong>Video Duration:</strong> ${(result.video_info?.duration && typeof result.video_info.duration === 'number') ? `${result.video_info.duration.toFixed(1)}s` : 'N/A'}</p>
+                <p><strong>Video FPS:</strong> ${(result.video_info?.fps && typeof result.video_info.fps === 'number') ? result.video_info.fps.toFixed(1) : 'N/A'}</p>
+                <p><strong>Processing Time:</strong> ${processingTimeStr}</p>
+                <p><strong>Processing Rate:</strong> ${effectiveFPS} frames/sec</p>
+                <p style="margin-top: 10px; color: #20c997;"><i class="fas fa-check-circle"></i> Ready for video analysis!</p>
+            `;
+            isVideoProcessed = true;
+        }
+
+        function enableChat() {
+            // Hide disabled message
+            document.getElementById('chat-disabled').style.display = 'none';
+            
+            // Show chat input
+            document.getElementById('chat-input-container').style.display = 'block';
+            document.getElementById('chat-input').disabled = false;
+            document.getElementById('send-btn').disabled = false;
+            document.getElementById('chat-input').focus();
+            
+            // Update chat status
+            document.getElementById('chat-status').textContent = 'Ready for questions';
+            document.getElementById('chat-status').style.color = '#20c997';
+        }
+
+        function sendChatMessage() {
+            const chatInput = document.getElementById('chat-input');
+            const message = chatInput.value.trim();
+            
+            if (!message || !isVideoProcessed) return;
+            
+            // Add user message to chat
+            addMessageToChat('user', message);
+            chatInput.value = '';
+            
+            // Show typing indicator
+            showTypingIndicator();
+            
+            // Send to backend
+            streamChatResponse(message);
+        }
+        
+        function streamChatResponse(message) {
+            // Create a temporary message element for streaming with unique ID
+            const chatMessages = document.getElementById('chat-messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message bot-message';
+            const uniqueId = `streaming-content-${Date.now()}`;
+            messageDiv.innerHTML = `
+                <div class="message-avatar">🤖</div>
+                <div class="message-content">
+                    <span id="${uniqueId}" class="streaming-text"></span>
+                </div>
+            `;
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            
+            const streamingContent = document.getElementById(uniqueId);
+            
+            // Get temporal analysis settings
+            const enableTemporal = document.getElementById('enable-temporal').checked;
+            const autoSnippets = document.getElementById('auto-snippets').checked;
+            
+            console.log(`Temporal analysis: ${enableTemporal}, Auto-snippets: ${autoSnippets}`);
+            
+            fetch('/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ 
+                    message: message,
+                    enable_temporal: enableTemporal,
+                    generate_snippets: autoSnippets && enableTemporal  // Only generate snippets if temporal is enabled
+                })
+            })
+            .then(response => response.json())
+            .then(result => {
+                hideTypingIndicator();
+                
+                if (result.error) {
+                    streamingContent.textContent = `❌ Error: ${result.error}`;
+                    streamingContent.className = '';
+                } else {
+                    // Display response immediately instead of streaming effect
+                    streamingContent.textContent = result.response;
+                    streamingContent.className = '';
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                    
+                    // Add temporal data if available and temporal analysis is enabled
+                    if (enableTemporal && result.temporal_data && result.temporal_data.has_temporal_references) {
+                        const timestampsHtml = `
+                            <div class="temporal-timestamps">
+                                ${result.temporal_data.timestamps.map(ts => `
+                                    <div class="timestamp-item">
+                                        <span class="timestamp-time">${ts.timestamp.toFixed(1)}s</span>
+                                        <span class="timestamp-description">${ts.sentence}</span>
+                                        <button class="snippet-btn" onclick="generateSnippet(${ts.timestamp})" title="Play segment around ${ts.timestamp.toFixed(1)}s">
+                                            <i class="fas fa-play"></i> Play
+                                        </button>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        `;
+                        messageDiv.querySelector('.message-content').innerHTML += timestampsHtml;
+                    }
+                    
+                    // Add video snippets if available and temporal analysis is enabled
+                    if (enableTemporal && result.video_snippets && result.video_snippets.length > 0) {
+                        const snippetsHtml = `
+                            <div class="video-snippets">
+                                ${result.video_snippets.map(snippet => `
+                                    <div class="video-snippet">
+                                        <div class="snippet-header">
+                                            <span class="snippet-timestamp">${snippet.target_timestamp.toFixed(1)}s</span>
+                                            <span class="snippet-description">${snippet.description || 'Video segment'}</span>
+                                            <button class="snippet-btn" onclick="generateSnippet(${snippet.target_timestamp})">
+                                                <i class="fas fa-play"></i> Jump & Play
+                                            </button>
+                                        </div>
+                                        <div style="font-size: 11px; color: rgba(33,37,41,0.6); margin-top: 5px;">
+                                            <i class="fas fa-clock"></i> Segment: ${snippet.start_time.toFixed(1)}s - ${snippet.end_time.toFixed(1)}s 
+                                            (1s before → ${(snippet.end_time - snippet.target_timestamp).toFixed(1)}s after)
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        `;
+                        messageDiv.querySelector('.message-content').innerHTML += snippetsHtml;
+                        
+                        // Automatically jump to the first snippet
+                        if (result.video_snippets.length > 0) {
+                            const firstSnippet = result.video_snippets[0];
+                            setTimeout(() => {
+                                generateSnippet(firstSnippet.target_timestamp);
+                            }, 500); // Small delay to ensure video is loaded
+                        }
+                    }
+                    
+                    // Skip metrics display in chat - keep it clean
+                }
+            })
+            .catch(error => {
+                hideTypingIndicator();
+                streamingContent.textContent = `❌ Network error: ${error.message}`;
+                streamingContent.className = '';
+            });
+        }
+        
+        function addMessageToChat(role, content, metrics = null) {
+            const chatMessages = document.getElementById('chat-messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}-message`;
+            
+            const avatar = role === 'user' ? '🎬' : '🤖';
+            
+            let metricsHtml = '';
+            if (metrics) {
+                metricsHtml = `
+                    <div class="message-metrics">
+                        ${Object.entries(metrics).map(([key, value]) => `
+                            <div class="message-metric">
+                                <div class="message-metric-value">${value}</div>
+                                <div class="message-metric-label">${key}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+            
+            messageDiv.innerHTML = `
+                <div class="message-avatar">${avatar}</div>
+                <div class="message-content">
+                    ${content}
+                    ${metricsHtml}
+                </div>
+            `;
+            
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        
+        function showTypingIndicator() {
+            document.getElementById('typing-indicator').style.display = 'block';
+            document.getElementById('chat-input').disabled = true;
+            document.getElementById('send-btn').disabled = true;
+        }
+        
+        function hideTypingIndicator() {
+            document.getElementById('typing-indicator').style.display = 'none';
+            document.getElementById('chat-input').disabled = false;
+            document.getElementById('send-btn').disabled = false;
+        }
+        
+        function clearChatHistory() {
+            fetch('/chat/clear', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    const chatMessages = document.getElementById('chat-messages');
+                    chatMessages.innerHTML = '';
+                    // Chat cleared silently - no message needed
+                }
+            })
+            .catch(error => {
+                addMessageToChat('bot', `❌ Error clearing history: ${error.message}`);
+            });
+        }
+        
+        function resetInterface() {
+            // Reset video processing
+            isVideoProcessed = false;
+            document.getElementById('process-form').reset();
+            document.getElementById('num_frames').value = '120';
+            document.getElementById('processing-status').classList.remove('show');
+            document.getElementById('error-message').style.display = 'none';
+            
+            // Reset chat
+            document.getElementById('chat-disabled').style.display = 'block';
+            document.getElementById('chat-input-container').style.display = 'none';
+            document.getElementById('chat-messages').innerHTML = `
+                <div class="chat-disabled" id="chat-disabled">
+                    <i class="fas fa-video" style="font-size: 3em; margin-bottom: 20px; color: rgba(108,117,125,0.5);"></i>
+                    <p>Process the video first to start chatting about its content.</p>
+                </div>
+            `;
+            document.getElementById('chat-status').textContent = 'Process video to start';
+            document.getElementById('chat-status').style.color = 'rgba(108,117,125,0.8)';
+            
+            hideTypingIndicator();
+        }
+
+        function generateSnippet(timestamp) {
+            console.log(`Jumping to timestamp: ${timestamp}s`);
+            
+            // Get video snippet info for proper segment handling
+            fetch('/video-snippet', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ 
+                    timestamp: timestamp,
+                    duration: 10.0 
+                })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    console.log('Video segment info:', result);
+                    // Play the specific segment with proper start/end times
+                    playVideoSegment(result.start_time, result.end_time, result.target_timestamp);
+                } else {
+                    console.error('Video segment failed:', result.error);
+                    // Fallback to direct timestamp jump
+                    jumpToTimestamp(timestamp);
+                }
+            })
+            .catch(error => {
+                console.error('Error getting video segment:', error);
+                // Fallback to direct timestamp jump
+                jumpToTimestamp(timestamp);
+            });
+        }
+        
+        function jumpToTimestamp(timestamp) {
+            const videoPlayer = document.getElementById('reference-video');
+            const videoInfo = document.getElementById('video-info');
+            
+            if (videoPlayer) {
+                videoPlayer.currentTime = timestamp;
+                videoPlayer.play();
+                
+                if (videoInfo) {
+                    videoInfo.innerHTML = `<i class="fas fa-play"></i> Playing at ${timestamp.toFixed(1)}s`;
+                    videoInfo.style.color = '#00ff88';
+                    videoInfo.style.display = 'block';
+                }
+                
+                console.log(`Video jumped to ${timestamp}s and started playing`);
+            }
+        }
+        
+        function updateVideoPlayerSegment(videoUrl, startTime, endTime, targetTimestamp) {
+            const videoPlayer = document.getElementById('reference-video');
+            const videoSource = document.getElementById('video-source');
+            const videoInfo = document.getElementById('video-info');
+            const videoPlaceholder = document.getElementById('video-placeholder');
+            
+            if (videoPlayer && videoSource) {
+                // Hide placeholder and show video
+                if (videoPlaceholder) {
+                    videoPlaceholder.style.display = 'none';
+                }
+                
+                videoSource.src = videoUrl;
+                videoPlayer.load();
+                videoPlayer.style.display = 'block';
+                
+                // Set up event listener to seek to start time when loaded
+                videoPlayer.onloadeddata = function() {
+                    videoPlayer.currentTime = startTime;
+                    console.log(`Video loaded, seeking to ${startTime}s`);
+                };
+                
+                // Set up time update listener to stop at end time
+                videoPlayer.ontimeupdate = function() {
+                    if (videoPlayer.currentTime >= endTime) {
+                        videoPlayer.pause();
+                        console.log(`Reached end time ${endTime}s, pausing`);
+                    }
+                };
+                
+                if (videoInfo) {
+                    videoInfo.innerHTML = `<i class="fas fa-play"></i> Segment: ${startTime.toFixed(1)}s - ${endTime.toFixed(1)}s (focus: ${targetTimestamp.toFixed(1)}s)`;
+                    videoInfo.style.color = '#00ff88';
+                    videoInfo.style.display = 'block';
+                }
+            }
+        }
+        
+        // Keep the old function for backward compatibility - 1 second back, 9 forward
+        function updateVideoPlayer(videoUrl, timestamp) {
+            updateVideoPlayerSegment(videoUrl, Math.max(0, timestamp - 1), timestamp + 9, timestamp);
+        }
+
+        function playVideoSegment(startTime, endTime, targetTimestamp) {
+            console.log(`Playing video segment: ${startTime}s - ${endTime}s (focus: ${targetTimestamp}s)`);
+            
+            const videoPlayer = document.getElementById('reference-video');
+            const videoInfo = document.getElementById('video-info');
+            
+            if (videoPlayer) {
+                // Clear any existing time update listeners
+                videoPlayer.removeEventListener('timeupdate', window.segmentTimeHandler);
+                
+                // Start playing from the beginning of the segment
+                videoPlayer.currentTime = startTime;
+                videoPlayer.play();
+                
+                // Create time update handler to stop at end time
+                window.segmentTimeHandler = function() {
+                    if (videoPlayer.currentTime >= endTime) {
+                        videoPlayer.pause();
+                        console.log(`Reached segment end at ${endTime}s, pausing`);
+                        
+                        if (videoInfo) {
+                            videoInfo.innerHTML = `<i class="fas fa-pause"></i> Segment complete: ${startTime.toFixed(1)}s - ${endTime.toFixed(1)}s`;
+                            videoInfo.style.color = '#ffaa00';
+                        }
+                        
+                        // Remove the event listener
+                        videoPlayer.removeEventListener('timeupdate', window.segmentTimeHandler);
+                    }
+                };
+                
+                // Add the time update listener
+                videoPlayer.addEventListener('timeupdate', window.segmentTimeHandler);
+                
+                if (videoInfo) {
+                    const beforeTime = (targetTimestamp - startTime).toFixed(1);
+                    const afterTime = (endTime - targetTimestamp).toFixed(1);
+                    videoInfo.innerHTML = `<i class="fas fa-play"></i> Playing: ${beforeTime}s before → ${targetTimestamp.toFixed(1)}s → ${afterTime}s after`;
+                    videoInfo.style.color = '#00ff88';
+                    videoInfo.style.display = 'block';
+                }
+                
+                console.log(`Started playing segment from ${startTime}s, will stop at ${endTime}s`);
+            }
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+    </script>
+</body>
+</html>

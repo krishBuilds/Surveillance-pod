@@ -1,0 +1,43 @@
+# InternVideo2.5 Requirements
+
+# Core dependencies
+torch>=2.0.0
+torchvision
+transformers==4.45.1
+accelerate
+einops
+
+# Video processing
+opencv-python-headless
+av
+decord
+imageio
+
+# Image processing
+Pillow
+scikit-image
+scipy
+
+# Utilities
+numpy
+pandas
+tqdm
+pyyaml
+huggingface-hub
+
+# Model optimization
+flash-attn
+bitsandbytes>=0.40.0
+timm
+
+# Tokenization
+sentencepiece
+tiktoken
+
+# Data handling
+datasets
+h5py
+
+# Web framework
+flask>=3.1.0
+blinker>=1.9.0
