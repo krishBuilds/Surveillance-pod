@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import enhanced model manager
 from main_enhanced import EnhancedModelManager
+# Import simple caption storage
+from simple_caption_storage import SimpleCaptionStorage
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'internvideo-surveillance-app'
@@ -38,6 +40,9 @@ DEFAULT_VIDEO = "inputs/videos/bigbuckbunny.mp4"
 # Global enhanced manager instance
 enhanced_manager = None
 
+# Global caption storage instance
+caption_db = None
+
 # Global caption storage for Q&A functionality
 caption_storage = {
     # Format: 'session_id': {
@@ -49,6 +54,13 @@ caption_storage = {
     #     'timestamp': datetime
     # }
 }
+
+def get_caption_db():
+    """Get or create the simple caption storage instance"""
+    global caption_db
+    if caption_db is None:
+        caption_db = SimpleCaptionStorage()
+    return caption_db
 
 def get_enhanced_manager():
     """Get or create the enhanced model manager with memory cleanup"""
@@ -547,6 +559,7 @@ def generate_caption_stream():
         return jsonify({'error': f'Invalid request data: {str(e)}'}), 400
     
     def generate_caption_updates():
+        final_result = None
         try:
             logger.info(f"[{request_id}] === STREAMING CAPTION GENERATION START ===")
             
@@ -566,7 +579,30 @@ def generate_caption_stream():
                 manager, video_path, video_file, fps_sampling, 
                 chunk_size, prompt, processing_mode, output_format, request_id
             ):
+                # Capture the final result for storage
+                if update.get('type') == 'complete' and update.get('success'):
+                    final_result = update
+                
                 yield f"data: {json.dumps(update)}\n\n"
+            
+            # Store caption in database after streaming completes
+            if final_result:
+                try:
+                    db = get_caption_db()
+                    storage_data = {
+                        'caption': final_result.get('caption', ''),
+                        'chunk_details': [],  # Streaming doesn't provide chunk details
+                        'video_duration': 0,  # Will be calculated from video info
+                        'frames_processed': final_result.get('total_frames', 0)
+                    }
+                    
+                    if db.store_video_caption(video_file, storage_data):
+                        logger.info(f"[{request_id}] Caption automatically stored after streaming for video: {video_file}")
+                    else:
+                        logger.warning(f"[{request_id}] Failed to store caption after streaming for video: {video_file}")
+                        
+                except Exception as storage_error:
+                    logger.error(f"[{request_id}] Error storing caption after streaming: {str(storage_error)}")
                 
         except Exception as e:
             logger.error(f"[{request_id}] Streaming error: {str(e)}")
@@ -656,6 +692,24 @@ def generate_caption():
                     'request_id': request_id,
                     'chunk_details': caption_result.get('chunk_details', [])
                 }
+                
+                # Automatically store caption in database
+                try:
+                    db = get_caption_db()
+                    storage_data = {
+                        'caption': caption_result['caption'],
+                        'chunk_details': caption_result.get('chunk_details', []),
+                        'video_duration': caption_result.get('chunk_details', [{}])[-1].get('end_time', 0) if caption_result.get('chunk_details') else 0,
+                        'frames_processed': caption_result['total_frames']
+                    }
+                    
+                    if db.store_video_caption(video_file, storage_data):
+                        logger.info(f"[{request_id}] Caption automatically stored for video: {video_file}")
+                    else:
+                        logger.warning(f"[{request_id}] Failed to store caption for video: {video_file}")
+                        
+                except Exception as storage_error:
+                    logger.error(f"[{request_id}] Error storing caption: {str(storage_error)}")
                 
                 logger.info(f"[{request_id}] Caption generation successful")
                 logger.info(f"[{request_id}] Caption length: {len(caption_result['caption'])} characters")
@@ -2105,6 +2159,191 @@ def status():
         
     except Exception as e:
         logger.error(f"Status check exception: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+# Caption Storage APIs for Automatic Flow
+@app.route('/api/stored-captions', methods=['GET'])
+def get_stored_captions():
+    """Get list of videos with stored captions for analysis page"""
+    try:
+        db = get_caption_db()
+        videos = db.get_all_videos_with_captions()
+        return jsonify({
+            'success': True,
+            'videos': videos
+        })
+    except Exception as e:
+        logger.error(f"Error fetching stored captions: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/video-caption/<video_file>', methods=['GET'])
+def get_video_caption_data(video_file):
+    """Get caption data for a specific video"""
+    try:
+        db = get_caption_db()
+        caption_data = db.get_video_caption(video_file)
+        
+        if caption_data:
+            return jsonify({
+                'success': True,
+                'data': caption_data
+            })
+        else:
+            return jsonify({'error': 'No caption found for this video'}), 404
+            
+    except Exception as e:
+        logger.error(f"Error fetching caption for video {video_file}: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+# Debug API to reset storage
+@app.route('/api/debug-reset-storage', methods=['POST'])
+def debug_reset_storage():
+    """Debug endpoint to force reset the storage instance"""
+    global caption_db
+    try:
+        caption_db = None  # Reset the global instance
+        new_db = get_caption_db()  # This will create a new instance with correct path
+        
+        # Test the new instance
+        test_videos = new_db.get_all_videos_with_captions()
+        
+        return jsonify({
+            'success': True, 
+            'message': 'Storage instance reset successfully',
+            'videos_found': len(test_videos),
+            'db_path': new_db.db_path
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# Chunk Relevance API
+@app.route('/api/find-relevant-chunk', methods=['POST'])
+def find_relevant_chunk():
+    """Use LLM to determine which chunk is most relevant for a given query"""
+    try:
+        data = request.get_json()
+        query = data.get('query', '').strip()
+        chunks = data.get('chunks', [])
+        
+        if not query:
+            return jsonify({'error': 'Query is required'}), 400
+        
+        if not chunks:
+            return jsonify({'error': 'Chunks array is required'}), 400
+        
+        # Get enhanced model manager for LLM processing
+        manager = get_enhanced_manager()
+        if not manager:
+            return jsonify({'error': 'Model manager not initialized'}), 500
+        
+        # Create prompt for LLM to analyze chunk relevance
+        chunk_summaries = []
+        for i, chunk in enumerate(chunks):
+            chunk_text = chunk.get('caption', chunk.get('text', ''))[:200]  # Limit text length
+            start_time = chunk.get('start_time', 0)
+            end_time = chunk.get('end_time', 0)
+            chunk_summaries.append(f"Chunk {i+1} (Time: {start_time:.1f}s-{end_time:.1f}s): {chunk_text}")
+        
+        analysis_prompt = f"""You are a video analysis system that selects the most relevant chunk for investigation queries.
+
+TASK: Find the chunk that best matches the user's query.
+
+USER QUERY: "{query}"
+
+VIDEO CHUNKS:
+{chr(10).join(chunk_summaries)}
+
+INSTRUCTIONS:
+- Analyze ONLY which chunk number is most relevant to the query
+- Do NOT answer the query itself
+- Do NOT provide explanations
+- Do NOT describe what happens in the chunks
+- Return ONLY the chunk number in this exact format: CHUNK_ID: X
+
+Where X is the number (1, 2, 3, etc.) of the most relevant chunk.
+
+RESPONSE FORMAT: CHUNK_ID: """
+
+        try:
+            # Use LLM to analyze and determine most relevant chunk
+            response = manager.chat_query(analysis_prompt, video_path=None)
+            
+            if response and response.get('success'):
+                llm_response = response.get('response', '').strip()
+                logger.info(f"LLM chunk analysis response: {llm_response}")
+                
+                # Extract chunk number from LLM response with specific format
+                try:
+                    import re
+                    # Look for CHUNK_ID: X format first
+                    chunk_id_match = re.search(r'CHUNK_ID:\s*(\d+)', llm_response)
+                    if chunk_id_match:
+                        chunk_number = int(chunk_id_match.group(1))
+                    else:
+                        # Fallback: look for any numbers in the response
+                        numbers = re.findall(r'\b(\d+)\b', llm_response)
+                        chunk_number = int(numbers[0]) if numbers else 1
+                    
+                    # Validate chunk number is within range
+                    if 1 <= chunk_number <= len(chunks):
+                        best_chunk_idx = chunk_number - 1  # Convert to 0-indexed
+                    else:
+                        best_chunk_idx = 0  # Fallback to first chunk
+                        
+                except (ValueError, IndexError, AttributeError):
+                    best_chunk_idx = 0  # Fallback to first chunk
+            else:
+                # LLM failed, use fallback
+                logger.warning("LLM analysis failed, using fallback logic")
+                best_chunk_idx = 0
+            
+            relevant_chunk_number = best_chunk_idx + 1  # 1-indexed
+            relevant_chunk = chunks[best_chunk_idx]
+            
+            # Calculate duration in seconds
+            start_time = relevant_chunk.get('start_time', 0)
+            end_time = relevant_chunk.get('end_time', 0)
+            duration = end_time - start_time
+            
+            return jsonify({
+                'success': True,
+                'relevant_chunk_number': relevant_chunk_number,
+                'relevant_chunk_index': best_chunk_idx,
+                'chunk_details': {
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'duration': duration,
+                    'caption': relevant_chunk.get('caption', relevant_chunk.get('text', '')),
+                    'llm_reasoning': llm_response if 'llm_response' in locals() else None
+                },
+                'query': query
+            })
+            
+        except Exception as analysis_error:
+            logger.error(f"Error in chunk analysis: {str(analysis_error)}")
+            # Fallback: return first chunk with duration
+            fallback_chunk = chunks[0] if chunks else {}
+            fallback_start = fallback_chunk.get('start_time', 0)
+            fallback_end = fallback_chunk.get('end_time', 0)
+            fallback_duration = fallback_end - fallback_start
+            
+            return jsonify({
+                'success': True,
+                'relevant_chunk_number': 1,
+                'relevant_chunk_index': 0,
+                'chunk_details': {
+                    'start_time': fallback_start,
+                    'end_time': fallback_end,
+                    'duration': fallback_duration,
+                    'caption': fallback_chunk.get('caption', fallback_chunk.get('text', '')),
+                    'llm_reasoning': None
+                },
+                'query': query,
+                'fallback': True
+            })
+        
+    except Exception as e:
+        logger.error(f"Error in find_relevant_chunk: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':

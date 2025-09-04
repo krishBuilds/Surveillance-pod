@@ -39,5 +39,4 @@ datasets
 h5py
 
 # Web framework
-flask>=3.1.0
-blinker>=1.9.0
+flask>=2.0.0

@@ -131,6 +131,113 @@
         </div>
     </div>
 
+    <!-- Chunk Relevance Analyzer -->
+    <div class="card mt-4">
+        <div class="card-header">
+            <div class="card-title">
+                <i class="fas fa-search nav-icon"></i>
+                Chunk Relevance Analyzer
+            </div>
+            <div class="card-subtitle">Find the most relevant video chunk for your investigation query</div>
+        </div>
+        <div class="card-body">
+            <div class="grid grid-2">
+                <!-- Input Section -->
+                <div>
+                    <div class="form-group mb-3">
+                        <label class="form-label">Select Video</label>
+                        <select id="video-selector" class="form-input">
+                            <option value="">Select a video with stored captions...</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group mb-3">
+                        <label class="form-label">Investigation Query</label>
+                        <textarea 
+                            id="chunk-query" 
+                            class="form-input" 
+                            placeholder="Enter your investigation query (e.g., 'Show me when the person enters the room')"
+                            rows="3"
+                        ></textarea>
+                    </div>
+                    
+                    <div class="form-group mb-3">
+                        <label class="form-label">Video Chunks (Auto-loaded)</label>
+                        <textarea 
+                            id="chunk-data" 
+                            class="form-input" 
+                            placeholder="Select a video above to automatically load its chunks..."
+                            rows="8"
+                            readonly
+                        ></textarea>
+                    </div>
+                    
+                    <button 
+                        id="analyze-chunks-btn" 
+                        class="btn btn-primary"
+                        style="width: 100%;"
+                        disabled
+                    >
+                        <i class="fas fa-brain"></i>
+                        Analyze with LLM
+                    </button>
+                </div>
+                
+                <!-- Results Section -->
+                <div>
+                    <div id="chunk-analysis-results" style="display: none;">
+                        <h4 style="color: var(--primary-color); margin-bottom: 1rem;">
+                            <i class="fas fa-bullseye"></i> Most Relevant Chunk
+                        </h4>
+                        
+                        <div class="result-card" style="padding: 1.5rem; background-color: var(--secondary-color); border-radius: 8px; border-left: 4px solid var(--primary-color);">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                                <div>
+                                    <strong style="font-size: 1.2rem;">Chunk #<span id="result-chunk-number">-</span></strong>
+                                </div>
+                                <div style="background-color: var(--primary-color); color: white; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.875rem;">
+                                    Duration: <span id="result-duration">-</span>s
+                                </div>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <strong>Time Range:</strong>
+                                <div style="font-family: monospace; background-color: rgba(0,0,0,0.1); padding: 0.5rem; border-radius: 4px; margin-top: 0.5rem;">
+                                    <span id="result-start-time">-</span>s - <span id="result-end-time">-</span>s
+                                </div>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <strong>Content:</strong>
+                                <div style="font-style: italic; padding: 0.75rem; background-color: rgba(0,0,0,0.1); border-radius: 4px; margin-top: 0.5rem;" id="result-caption">
+                                    -
+                                </div>
+                            </div>
+                            
+                            <div id="llm-reasoning-section" style="display: none;">
+                                <strong>LLM Analysis:</strong>
+                                <div style="font-size: 0.9rem; color: var(--text-secondary); padding: 0.75rem; background-color: rgba(0,0,0,0.1); border-radius: 4px; margin-top: 0.5rem;" id="llm-reasoning">
+                                    -
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div id="chunk-analysis-loading" style="display: none; text-align: center; padding: 3rem;">
+                        <i class="fas fa-brain fa-spin" style="font-size: 2rem; color: var(--primary-color);"></i>
+                        <p style="margin-top: 1rem;">LLM analyzing chunks...</p>
+                    </div>
+                    
+                    <div id="chunk-analysis-placeholder" style="text-center: center; color: var(--text-secondary); padding: 3rem;">
+                        <i class="fas fa-search" style="font-size: 3rem; opacity: 0.3;"></i>
+                        <p style="margin-top: 1rem;">Enter your query and chunk data</p>
+                        <p style="font-size: 0.875rem;">LLM will determine the most relevant chunk</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Temporal Analysis Visualization -->
     <div class="card mt-4">
         <div class="card-header">
@@ -342,6 +449,206 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     updateAnalyticsMockData();
+    
+    // Chunk Analysis Functionality
+    const analyzeBtn = document.getElementById('analyze-chunks-btn');
+    const queryInput = document.getElementById('chunk-query');
+    const chunkDataInput = document.getElementById('chunk-data');
+    const videoSelector = document.getElementById('video-selector');
+    const loadingDiv = document.getElementById('chunk-analysis-loading');
+    const resultsDiv = document.getElementById('chunk-analysis-results');
+    const placeholderDiv = document.getElementById('chunk-analysis-placeholder');
+    
+    // Load available videos on page load
+    async function loadAvailableVideos() {
+        try {
+            const response = await fetch('/api/stored-captions');
+            const data = await response.json();
+            
+            if (data.success && data.videos.length > 0) {
+                videoSelector.innerHTML = '<option value="">Select a video with stored captions...</option>';
+                
+                data.videos.forEach(video => {
+                    const option = document.createElement('option');
+                    option.value = video.video_file;
+                    option.textContent = `${video.video_file} (${video.total_frames} frames, ${new Date(video.created_at).toLocaleString()})`;
+                    videoSelector.appendChild(option);
+                });
+            } else {
+                videoSelector.innerHTML = '<option value="">No videos with captions found. Generate captions first.</option>';
+            }
+        } catch (error) {
+            console.error('Error loading videos:', error);
+            videoSelector.innerHTML = '<option value="">Error loading videos</option>';
+        }
+    }
+    
+    // Load video caption data when video is selected
+    videoSelector.addEventListener('change', async function() {
+        const videoFile = this.value;
+        
+        if (!videoFile) {
+            chunkDataInput.value = '';
+            chunkDataInput.placeholder = 'Select a video above to automatically load its chunks...';
+            analyzeBtn.disabled = true;
+            return;
+        }
+        
+        try {
+            const response = await fetch(`/api/video-caption/${encodeURIComponent(videoFile)}`);
+            const data = await response.json();
+            
+            if (data.success) {
+                // Format chunks for display
+                let chunks = data.data.chunks || [];
+                
+                // If no chunks (streaming captions), create real 20-second chunks from full caption
+                if (chunks.length === 0 && data.data.full_caption) {
+                    const fullCaption = data.data.full_caption;
+                    const totalFrames = data.data.total_frames || 140;
+                    
+                    // Calculate video duration assuming 4 FPS (frames per second)
+                    const videoDuration = totalFrames / 4; // 4 FPS as you specified
+                    
+                    // Create 20-second chunks to match your processing
+                    const chunkDuration = 20; // 20 seconds as you specified
+                    const numChunks = Math.ceil(videoDuration / chunkDuration);
+                    
+                    // Split caption text roughly evenly across chunks, skip markdown headers
+                    const captionParts = fullCaption.split(/\n\n+/)
+                        .filter(part => part.trim().length > 10)
+                        .filter(part => !part.startsWith('**') && !part.startsWith('#') && !part.includes('Video Summary'));
+                    
+                    chunks = [];
+                    for (let i = 0; i < numChunks; i++) {
+                        const startTime = i * chunkDuration;
+                        const endTime = Math.min((i + 1) * chunkDuration, videoDuration);
+                        
+                        // Assign caption parts to chunks
+                        const partIndex = Math.floor((captionParts.length * i) / numChunks);
+                        const chunkCaption = captionParts[partIndex] || `Video segment ${i + 1} of ${numChunks}`;
+                        
+                        chunks.push({
+                            caption: chunkCaption.trim(),
+                            start_time: startTime,
+                            end_time: endTime,
+                            chunk_id: i + 1
+                        });
+                    }
+                    
+                    console.log(`Created ${chunks.length} real 20s chunks from ${totalFrames} frames at 4fps (${videoDuration.toFixed(1)}s video)`);
+                }
+                
+                const formattedChunks = JSON.stringify(chunks, null, 2);
+                chunkDataInput.value = formattedChunks;
+                
+                // Enable analyze button if we have chunks
+                analyzeBtn.disabled = chunks.length === 0;
+                
+                showNotification(`Loaded ${chunks.length} chunks for ${videoFile}`, 'success');
+            } else {
+                chunkDataInput.value = '';
+                chunkDataInput.placeholder = 'No chunks found for this video';
+                analyzeBtn.disabled = true;
+                showNotification('No chunks found for this video', 'warning');
+            }
+        } catch (error) {
+            console.error('Error loading video caption:', error);
+            chunkDataInput.value = '';
+            chunkDataInput.placeholder = 'Error loading chunks';
+            analyzeBtn.disabled = true;
+            showNotification('Error loading video chunks', 'error');
+        }
+    });
+    
+    // Initialize videos on page load
+    loadAvailableVideos();
+    
+    if (analyzeBtn) {
+        analyzeBtn.addEventListener('click', async function() {
+            const query = queryInput.value.trim();
+            const chunkDataText = chunkDataInput.value.trim();
+            
+            if (!query) {
+                showNotification('Please enter an investigation query', 'error');
+                return;
+            }
+            
+            if (!chunkDataText) {
+                showNotification('Please select a video to load chunks automatically', 'error');
+                return;
+            }
+            
+            let chunks;
+            try {
+                chunks = JSON.parse(chunkDataText);
+                if (!Array.isArray(chunks)) {
+                    throw new Error('Data must be an array of chunks');
+                }
+            } catch (e) {
+                showNotification('Invalid JSON format in chunk data', 'error');
+                return;
+            }
+            
+            // Show loading state
+            placeholderDiv.style.display = 'none';
+            resultsDiv.style.display = 'none';
+            loadingDiv.style.display = 'block';
+            analyzeBtn.disabled = true;
+            analyzeBtn.innerHTML = '<i class="fas fa-brain fa-spin"></i> Analyzing...';
+            
+            try {
+                const response = await fetch('/api/find-relevant-chunk', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        query: query,
+                        chunks: chunks
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Display results
+                    document.getElementById('result-chunk-number').textContent = data.relevant_chunk_number;
+                    document.getElementById('result-duration').textContent = data.chunk_details.duration.toFixed(1);
+                    document.getElementById('result-start-time').textContent = data.chunk_details.start_time.toFixed(1);
+                    document.getElementById('result-end-time').textContent = data.chunk_details.end_time.toFixed(1);
+                    document.getElementById('result-caption').textContent = data.chunk_details.caption;
+                    
+                    // Show LLM reasoning if available
+                    const reasoningSection = document.getElementById('llm-reasoning-section');
+                    const reasoningText = document.getElementById('llm-reasoning');
+                    if (data.chunk_details.llm_reasoning) {
+                        reasoningText.textContent = data.chunk_details.llm_reasoning;
+                        reasoningSection.style.display = 'block';
+                    } else {
+                        reasoningSection.style.display = 'none';
+                    }
+                    
+                    loadingDiv.style.display = 'none';
+                    resultsDiv.style.display = 'block';
+                    
+                    showNotification('Chunk analysis completed successfully!', 'success');
+                } else {
+                    throw new Error(data.error || 'Analysis failed');
+                }
+                
+            } catch (error) {
+                console.error('Chunk analysis error:', error);
+                showNotification('Error analyzing chunks: ' + error.message, 'error');
+                
+                loadingDiv.style.display = 'none';
+                placeholderDiv.style.display = 'block';
+            } finally {
+                analyzeBtn.disabled = false;
+                analyzeBtn.innerHTML = '<i class="fas fa-brain"></i> Analyze with LLM';
+            }
+        });
+    }
     
     // Update stats periodically
     setInterval(() => {
