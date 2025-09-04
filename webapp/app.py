@@ -38,6 +38,18 @@ DEFAULT_VIDEO = "inputs/videos/bigbuckbunny.mp4"
 # Global enhanced manager instance
 enhanced_manager = None
 
+# Global caption storage for Q&A functionality
+caption_storage = {
+    # Format: 'session_id': {
+    #     'video_path': str,
+    #     'chunks': [
+    #         {'chunk_id': int, 'start_time': float, 'end_time': float, 'caption': str, 'frames': int},
+    #     ],
+    #     'total_duration': float,
+    #     'timestamp': datetime
+    # }
+}
+
 def get_enhanced_manager():
     """Get or create the enhanced model manager with memory cleanup"""
     global enhanced_manager
@@ -811,6 +823,31 @@ def process_video_segment(model_manager, video_path, prompt, num_frames, start_t
             fps_sampling=fps_sampling
         )
         
+        # SHAPE FIXER: Validate and fix tensor shape mismatches
+        if pixel_values is not None and len(num_patches_list) > 0:
+            expected_frames = len(num_patches_list)
+            actual_frames = pixel_values.shape[0] if len(pixel_values.shape) > 0 else 0
+            
+            # Fix shape mismatch by adjusting to expected frames
+            if actual_frames != expected_frames:
+                if actual_frames > expected_frames:
+                    # Truncate to expected frames
+                    pixel_values = pixel_values[:expected_frames]
+                elif actual_frames < expected_frames and actual_frames > 0:
+                    # Pad with last frame to reach expected frames
+                    last_frame = pixel_values[-1:].repeat(expected_frames - actual_frames, 1, 1, 1)
+                    pixel_values = torch.cat([pixel_values, last_frame], dim=0)
+                
+                # Adjust num_patches_list to match actual tensor shape
+                if len(num_patches_list) != pixel_values.shape[0]:
+                    if len(num_patches_list) > pixel_values.shape[0]:
+                        num_patches_list = num_patches_list[:pixel_values.shape[0]]
+                    else:
+                        # Extend num_patches_list with the last value
+                        last_patches = num_patches_list[-1] if num_patches_list else 1
+                        while len(num_patches_list) < pixel_values.shape[0]:
+                            num_patches_list.append(last_patches)
+        
         # Handle tensor dtype based on quantization settings
         if model_manager.enable_8bit or model_manager.enable_4bit:
             pixel_values = pixel_values.to(torch.float16).to(model_manager.model.device)
@@ -819,34 +856,130 @@ def process_video_segment(model_manager, video_path, prompt, num_frames, start_t
         
         video_prefix = "".join([f"Frame{i+1}: <image>\n" for i in range(len(num_patches_list))])
         
-        # Prepare generation config
+        # Optimized generation config for descriptive text (speed + quality balance)
         generation_config = dict(
-            do_sample=False,
-            temperature=0.0,
-            max_new_tokens=1024,
-            top_p=0.1,
-            num_beams=1
+            do_sample=True,  # Enable sampling for varied descriptive responses
+            temperature=0.3,  # Optimal for factual yet diverse descriptions (0.2-0.5 range)
+            max_new_tokens=256,  # Reduced for faster processing per chunk
+            top_p=1.0,  # Don't restrict vocabulary when using temperature
+            num_beams=1,
+            pad_token_id=model_manager.tokenizer.eos_token_id,  # Prevent padding issues
+            repetition_penalty=1.1,  # Prevent repetitive content
+            length_penalty=0.8  # Encourage concise responses
         )
         
         # Build full question with video frames
         question = video_prefix + prompt
         
-        # Run actual inference
-        with torch.no_grad():
-            output, _ = model_manager.model.chat(
-                model_manager.tokenizer,
-                pixel_values,
-                question,
-                generation_config,
-                num_patches_list=num_patches_list,
-                history=None,
-                return_history=True
-            )
+        # Run actual inference with retry logic for tracking responses
+        max_retries = 2
+        output = None
+        
+        for retry_attempt in range(max_retries + 1):
+            # Adjust generation config for retries
+            if retry_attempt == 1:
+                # First retry: Higher temperature, different sampling
+                generation_config.update({
+                    'temperature': 0.6,
+                    'top_p': 0.8,
+                    'repetition_penalty': 1.2
+                })
+            elif retry_attempt == 2:
+                # Second retry: Even more aggressive anti-tracking
+                generation_config.update({
+                    'temperature': 0.8,
+                    'top_k': 50,
+                    'top_p': 0.9,
+                    'repetition_penalty': 1.3
+                })
+                # Add stronger anti-tracking instruction
+                if "IMPORTANT: Write only descriptive text" not in question:
+                    question = "IMPORTANT: Write ONLY descriptive narrative text. Do NOT use any XML tags, tracking format, or structured data.\n\n" + question
+            
+            with torch.no_grad():
+                output, _ = model_manager.model.chat(
+                    model_manager.tokenizer,
+                    pixel_values,
+                    question,
+                    generation_config,
+                    num_patches_list=num_patches_list,
+                    history=None,
+                    return_history=True
+                )
+            
+            # Quick check for tracking tokens before full processing
+            if not any(token in output.lower() for token in ['<track', '<tracking>', 'tracking>', '</track']):
+                break  # Good response, exit retry loop
+                
+        # If all retries failed, we'll continue with the last attempt
+        
+        # Clean up the output - remove prefixes, HTML tags, and validate
+        import re
+        cleaned_output = output.strip()
+        
+        # Remove common prefixes
+        prefixes_to_remove = ["Answer: ", "Response: ", "Caption: ", "Description: "]
+        for prefix in prefixes_to_remove:
+            if cleaned_output.startswith(prefix):
+                cleaned_output = cleaned_output[len(prefix):].strip()
+        
+        # Handle tracking tokens and HTML tags
+        # First remove tracking tokens that InternVideo2.5 sometimes returns
+        tracking_patterns = [
+            r'<track_begin>.*?</track_begin>',
+            r'<tracking>.*?</tracking>',
+            r'<track_begin>',
+            r'</track_begin>',
+            r'<tracking>',
+            r'</tracking>'
+        ]
+        for pattern in tracking_patterns:
+            cleaned_output = re.sub(pattern, '', cleaned_output, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Then remove other HTML tags (like <span>, </span>, etc.)
+        cleaned_output = re.sub(r'<[^>]+>', '', cleaned_output).strip()
+        
+        # Remove extra whitespace and newlines
+        cleaned_output = re.sub(r'\s+', ' ', cleaned_output).strip()
+        
+        # Check for invalid responses
+        emoticon_patterns = ['>.<', '>_<', '-_-', 'T_T', '^_^', 'o_o', 'O_O', '._.',  '...', ':)', ':(', ':D']
+        invalid_responses = ["i'm not sure", "i don't know", "i cannot see", "i cannot determine", "unable to", "sorry", "apologize"]
+        html_fragments = ["span>", "<span", "div>", "<div", "</", "/>"]
+        
+        is_invalid = (
+            not cleaned_output or  # Empty after cleaning
+            len(cleaned_output) < 10 or  # Too short (reduced from 15)
+            cleaned_output in emoticon_patterns or  # Just an emoticon
+            any(invalid in cleaned_output.lower() for invalid in invalid_responses) or  # Uncertain responses (exact match)
+            any(html in cleaned_output.lower() for html in html_fragments) or  # HTML fragments
+            cleaned_output.count(' ') < 2  # Less than 3 words (reduced from 4)
+        )
+        
+        if is_invalid:
+            # Log detailed info about why response was rejected
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"REJECTED RESPONSE - Cleaned: '{cleaned_output}' | Original: '{output}' | Length: {len(cleaned_output)} | Words: {cleaned_output.count(' ') + 1 if cleaned_output else 0}")
+            
+            # Return error so this chunk gets skipped and doesn't pollute context
+            return {
+                'success': False,
+                'error': f'Model returned invalid response: "{cleaned_output[:50]}" (Original: "{output[:50]}")',
+                'original_output': output,
+                'segment_start': start_time,
+                'segment_end': end_time
+            }
+        
+        # Log successful response for debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"ACCEPTED RESPONSE - Segment {start_time:.0f}-{end_time:.0f}s: '{cleaned_output[:100]}{'...' if len(cleaned_output) > 100 else ''}' | Length: {len(cleaned_output)} | Words: {cleaned_output.count(' ') + 1}")
         
         return {
             'success': True,
-            'response': output,
-            'text': output,
+            'response': cleaned_output,
+            'text': cleaned_output,
             'frames_processed': len(num_patches_list),
             'segment_start': start_time,
             'segment_end': end_time
@@ -903,20 +1036,48 @@ def process_video_for_caption_streaming(manager, video_path, video_file, fps_sam
             try:
                 chunk_start_time = time.time()
                 
-                # Build context from previous chunks
-                context_prompt = ""
-                if previous_captions:
-                    recent_context = previous_captions[-3:] if len(previous_captions) >= 3 else previous_captions
-                    context_summary = " ".join(recent_context)
-                    if len(context_summary) > 500:
-                        context_summary = context_summary[-500:]
-                    context_prompt = f"\n\nPrevious context: {context_summary}\n\nNow, "
+                # Use explicit description prompt to avoid tracking mode
+                base_prompt = f"{prompt}"
                 
-                # Combine prompt with context
-                if "concise" not in prompt.lower() and "brief" not in prompt.lower():
-                    chunk_prompt = f"{prompt}{context_prompt}for this {chunk_duration:.0f}-second segment ({start_time:.0f}-{end_time:.0f}s): Focus on what happens NEXT, continuing from the previous events. Describe the main actions and movements (3-5 sentences)."
+                if chunk_idx == 0:
+                    # First chunk - enhanced detail request with anti-tracking instructions
+                    chunk_prompt = f"""IMPORTANT: Write only descriptive text. Do NOT use tracking format or XML tags.
+
+{base_prompt}
+
+Provide a comprehensive, detailed description of what happens in this video segment. Include: setting/environment, people's appearance and actions, objects present, movements, interactions, and any notable details. Write in narrative style with rich visual descriptions. Use only plain text description."""
                 else:
-                    chunk_prompt = f"{prompt}{context_prompt}segment {start_time:.0f}-{end_time:.0f} seconds."
+                    # Subsequent chunks - use last 2 captions for context, focus on NEW content only
+                    if previous_captions:
+                        # Build minimal context from last 1-2 captions
+                        context_parts = []
+                        for i, cap in enumerate(previous_captions[-2:]):  # Last 2 captions max
+                            # Clean numbered lists and extract key info
+                            import re
+                            # Remove numbered list formatting (1., 2., etc.)
+                            cleaned_cap = re.sub(r'^\d+\.\s*', '', cap)
+                            # Remove any leading numbers or bullets
+                            cleaned_cap = re.sub(r'^[\d\-\*\•]\s*', '', cleaned_cap)
+                            # Extract first sentence only (key transition info)
+                            first_sentence = cleaned_cap.split('.')[0][:40] + "..." if len(cleaned_cap) > 40 else cleaned_cap.split('.')[0]
+                            context_parts.append(f"Previous scene: {first_sentence}")
+                        
+                        context_text = " | ".join(context_parts)
+                        
+                        chunk_prompt = f"""CONTEXT: {context_text}
+
+IMPORTANT: Write a fresh, complete description of what happens in THIS video segment. Do NOT continue numbered lists. Do NOT just write numbers. Write full descriptive sentences about the NEW content only.
+
+{base_prompt}
+
+Describe what happens in this video segment with complete sentences. Focus on NEW actions, movements, and events. Start your description directly without numbers or list formatting."""
+                    else:
+                        # No context, standard description request
+                        chunk_prompt = f"""IMPORTANT: Write only descriptive text. Do NOT use tracking format or XML tags.
+
+{base_prompt}
+
+Describe what happens in this specific video segment. Focus on actions, movements, setting, people, and events visible in this time period."""
                 
                 result = process_video_segment(
                     manager.model_manager,
@@ -965,8 +1126,11 @@ def process_video_for_caption_streaming(manager, video_path, video_file, fps_sam
                 chunk_captions.append(formatted_chunk)
                 total_frames_processed += chunk_frames
                 
-                # Add to context for next chunks (use raw caption)
+                # Add to context for next chunks (use raw caption, limit storage)
                 previous_captions.append(caption_text)
+                # Keep only last 2 captions to prevent memory buildup
+                if len(previous_captions) > 2:
+                    previous_captions = previous_captions[-2:]
                 
                 # Yield chunk completion with the caption
                 yield {
@@ -980,9 +1144,15 @@ def process_video_for_caption_streaming(manager, video_path, video_file, fps_sam
                     'progress': ((chunk_idx + 1) / effective_chunks) * 100
                 }
                 
-                # Mandatory cleanup after every chunk to prevent slowdown
-                manager._clear_preprocessed_data()
-                yield {'type': 'cleanup', 'message': f'Cleaned cache after chunk {chunk_idx + 1} (preventing slowdown)'}
+                # Selective cleanup - only every 3 chunks or on last chunk to balance memory vs speed
+                if (chunk_idx + 1) % 3 == 0 or chunk_idx == effective_chunks - 1:
+                    manager._clear_preprocessed_data()
+                    yield {'type': 'cleanup', 'message': f'Cleaned cache after chunk {chunk_idx + 1}'}
+                    
+                # Light cleanup after each chunk - just clear CUDA cache
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                     
             except Exception as chunk_error:
                 yield {'type': 'chunk_error', 'chunk': chunk_idx + 1, 'message': str(chunk_error)}
@@ -1153,24 +1323,22 @@ def process_video_for_caption_optimized(manager, video_path, video_file, fps_sam
                 try:
                     chunk_start_time = time.time()
                     
-                    # Build context from previous chunks (last 3)
-                    context_prompt = ""
-                    if previous_captions:
-                        # Get last 3 captions for context
-                        recent_context = previous_captions[-3:] if len(previous_captions) >= 3 else previous_captions
-                        context_summary = " ".join(recent_context)
-                        # Limit context length to avoid overwhelming the prompt
-                        if len(context_summary) > 500:
-                            context_summary = context_summary[-500:]
-                        context_prompt = f"\n\nPrevious context: {context_summary}\n\nNow, "
+                    # Use explicit description prompt to avoid tracking mode
+                    base_prompt = f"{prompt}"
                     
-                    # Combine user prompt with context and constraints
-                    if "concise" not in prompt.lower() and "brief" not in prompt.lower():
-                        # Add context and focus instruction
-                        chunk_prompt = f"{prompt}{context_prompt}for this {chunk_duration:.0f}-second segment ({start_time:.0f}-{end_time:.0f}s): Focus on what happens NEXT, continuing from the previous events. Describe the main actions and movements (3-5 sentences)."
+                    if chunk_idx == 0:
+                        # First chunk - clear description request
+                        chunk_prompt = f"{base_prompt}\n\nProvide a detailed description of what happens in this video segment. Do not use tracking or object detection format."
                     else:
-                        # User already requested concise output
-                        chunk_prompt = f"{prompt}{context_prompt}segment {start_time:.0f}-{end_time:.0f} seconds."
+                        # Subsequent chunks - add minimal context
+                        if previous_captions and len(previous_captions[-1]) > 50:
+                            last_caption = previous_captions[-1]
+                            if len(last_caption) > 200:
+                                last_caption = last_caption[:200] + "..."
+                            chunk_prompt = f"Previous: {last_caption}\n\n{base_prompt}\n\nDescribe what happens next in this video segment. Provide a narrative description, not tracking data."
+                        else:
+                            # No context, clear description request
+                            chunk_prompt = f"{base_prompt}\n\nProvide a detailed description of what happens in this video segment. Do not use tracking or object detection format."
                     
                     result = process_video_segment(
                         manager.model_manager,
@@ -1225,7 +1393,19 @@ def process_video_for_caption_optimized(manager, video_path, video_file, fps_sam
                     total_frames_processed += chunk_frames
                     
                     # Add to context for next chunks (use raw caption, not formatted)
-                    previous_captions.append(caption_text)
+                    # Only skip clearly broken responses
+                    skip_patterns = ['>.<', '>_<', "i'm not sure", "i don't know", "span>", "<span", "sorry"]
+                    is_valid_context = (
+                        caption_text and  # Not empty
+                        len(caption_text) > 20 and  # Reasonable length
+                        caption_text.count(' ') >= 3 and  # At least 4 words
+                        not any(pattern in caption_text.lower() for pattern in skip_patterns)
+                    )
+                    
+                    if is_valid_context:
+                        previous_captions.append(caption_text)
+                    else:
+                        logger.warning(f"[{request_id}] Skipping invalid caption from context: {caption_text[:50]}")
                     
                     # Store chunk details for UI updates
                     chunk_details.append({
