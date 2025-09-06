@@ -24,6 +24,10 @@ from main_enhanced import EnhancedModelManager
 # Import simple caption storage
 from simple_caption_storage import SimpleCaptionStorage
 
+# Import OpenAI for chunk determination
+from openai import OpenAI
+import yaml
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'internvideo-surveillance-app'
 
@@ -43,6 +47,10 @@ enhanced_manager = None
 # Global caption storage instance
 caption_db = None
 
+# OpenAI client for chunk determination
+openai_client = None
+openai_config = None
+
 # Global caption storage for Q&A functionality
 caption_storage = {
     # Format: 'session_id': {
@@ -61,6 +69,25 @@ def get_caption_db():
     if caption_db is None:
         caption_db = SimpleCaptionStorage()
     return caption_db
+
+def get_openai_client():
+    """Get or create the OpenAI client for chunk determination"""
+    global openai_client, openai_config
+    if openai_client is None:
+        try:
+            config_path = os.path.join(os.path.dirname(__file__), 'openai_config.yaml')
+            with open(config_path, 'r') as f:
+                openai_config = yaml.safe_load(f)
+            
+            openai_client = OpenAI(
+                api_key=openai_config['openai']['api_key']
+            )
+            logger.info("OpenAI client initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {str(e)}")
+            openai_client = None
+            openai_config = None
+    return openai_client
 
 def get_enhanced_manager():
     """Get or create the enhanced model manager with memory cleanup"""
@@ -651,11 +678,11 @@ def generate_caption():
             return jsonify({'error': f'Video file must be one of: {", ".join(available_videos)}'}), 400
         
         # Validate parameters
-        if fps_sampling < 0.1 or fps_sampling > 3.0:
-            return jsonify({'error': 'FPS sampling must be between 0.1 and 3.0'}), 400
+        if fps_sampling < 0.1 or fps_sampling > 4.0:
+            return jsonify({'error': 'FPS sampling must be between 0.1 and 4.0'}), 400
             
-        if chunk_size < 30 or chunk_size > 180:
-            return jsonify({'error': 'Chunk size must be between 30 and 180 seconds'}), 400
+        if chunk_size < 20 or chunk_size > 180:
+            return jsonify({'error': 'Chunk size must be between 20 and 180 seconds'}), 400
         
         # Get video path
         video_path = os.path.join(base_dir, f"inputs/videos/{video_file}")
@@ -783,11 +810,11 @@ def generate_caption_original():
             return jsonify({'error': f'Video file must be one of: {", ".join(available_videos)}'}), 400
         
         # Validate parameters
-        if fps_sampling < 0.1 or fps_sampling > 3.0:
-            return jsonify({'error': 'FPS sampling must be between 0.1 and 3.0'}), 400
+        if fps_sampling < 0.1 or fps_sampling > 4.0:
+            return jsonify({'error': 'FPS sampling must be between 0.1 and 4.0'}), 400
             
-        if chunk_size < 30 or chunk_size > 180:
-            return jsonify({'error': 'Chunk size must be between 30 and 180 seconds'}), 400
+        if chunk_size < 20 or chunk_size > 180:
+            return jsonify({'error': 'Chunk size must be between 20 and 180 seconds'}), 400
         
         
         # Get video path
@@ -2216,10 +2243,10 @@ def debug_reset_storage():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# Chunk Relevance API
+
 @app.route('/api/find-relevant-chunk', methods=['POST'])
 def find_relevant_chunk():
-    """Use LLM to determine which chunk is most relevant for a given query"""
+    """Use GPT-4o mini to determine which chunk is most relevant for a given query"""
     try:
         data = request.get_json()
         query = data.get('query', '').strip()
@@ -2231,98 +2258,108 @@ def find_relevant_chunk():
         if not chunks:
             return jsonify({'error': 'Chunks array is required'}), 400
         
-        # Get enhanced model manager for LLM processing
-        manager = get_enhanced_manager()
-        if not manager:
-            return jsonify({'error': 'Model manager not initialized'}), 500
+        # Get OpenAI client
+        client = get_openai_client()
+        if not client:
+            return jsonify({'error': 'OpenAI client not initialized'}), 500
         
-        # Create prompt for LLM to analyze chunk relevance
+        # Create chunk summaries for GPT-4o mini with clear demarcation
         chunk_summaries = []
         for i, chunk in enumerate(chunks):
-            chunk_text = chunk.get('caption', chunk.get('text', ''))[:200]  # Limit text length
+            chunk_text = chunk.get('caption', chunk.get('text', ''))[:300]  # Increased from 200 to 300 for more context
             start_time = chunk.get('start_time', 0)
             end_time = chunk.get('end_time', 0)
-            chunk_summaries.append(f"Chunk {i+1} (Time: {start_time:.1f}s-{end_time:.1f}s): {chunk_text}")
+            duration = end_time - start_time
+            chunk_summaries.append(f"CHUNK #{i+1} [Time: {start_time:.1f}s-{end_time:.1f}s, Duration: {duration:.1f}s]\nContent: {chunk_text}\n")
         
-        analysis_prompt = f"""You are a video analysis system that selects the most relevant chunk for investigation queries.
+        # Create prompt for GPT-4o mini
+        prompt = f"""You are analyzing a sequence of video captions generated by AI video analysis. These chunks represent consecutive time segments from a single video, with each chunk containing the AI's description of what happens during that time period.
 
-TASK: Find the chunk that best matches the user's query.
+CONTEXT: 
+- These are sequential video caption chunks from AI analysis of surveillance/security footage
+- Each chunk represents a specific time segment with detailed scene descriptions
+- The chunks are in chronological order and may show progression of events
+- You need to identify which time segment most likely contains the requested event
 
 USER QUERY: "{query}"
 
-VIDEO CHUNKS:
+VIDEO CAPTION SEQUENCE (Sequential Time Segments):
 {chr(10).join(chunk_summaries)}
 
-INSTRUCTIONS:
-- Analyze ONLY which chunk number is most relevant to the query
-- Do NOT answer the query itself
-- Do NOT provide explanations
-- Do NOT describe what happens in the chunks
-- Return ONLY the chunk number in this exact format: CHUNK_ID: X
+ANALYSIS INSTRUCTIONS:
+- Each chunk is clearly marked as "CHUNK #1", "CHUNK #2", etc. with time ranges and duration
+- These are AI-generated video captions describing what happens in each time segment
+- Analyze which chunk most likely contains the event/scene described in the user query
+- Consider the temporal sequence - events may build up across chunks
+- Focus on matching the specific event/action/scene requested by the user
+- Select the chunk where the requested event is most prominently described
 
-Where X is the number (1, 2, 3, etc.) of the most relevant chunk.
+IMPORTANT: The chunks above are numbered as CHUNK #1, CHUNK #2, etc. 
+Return the exact number from the chunk that best matches the query.
 
-RESPONSE FORMAT: CHUNK_ID: """
+RESPONSE FORMAT: Return ONLY the chunk number in this exact format: CHUNK_ID: X
+Where X is the number (1, 2, 3, etc.) matching the CHUNK #X that contains the requested event.
+
+CHUNK_ID: """
 
         try:
-            # Use LLM to analyze and determine most relevant chunk
-            response = manager.chat_query(analysis_prompt, video_path=None)
+            # Call GPT-4o mini for chunk determination
+            response = client.chat.completions.create(
+                model=openai_config['openai']['model'],
+                messages=[
+                    {"role": "system", "content": "You are a specialist in analyzing AI-generated video captions from surveillance/security footage. Your task is to identify which time segment contains specific events or actions based on the sequential video descriptions."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=openai_config['openai']['max_tokens'],
+                temperature=openai_config['openai']['temperature']
+            )
             
-            if response and response.get('success'):
-                llm_response = response.get('response', '').strip()
-                logger.info(f"LLM chunk analysis response: {llm_response}")
+            gpt_response = response.choices[0].message.content.strip()
+            logger.info(f"GPT-4o mini response: {gpt_response}")
+            
+            # Extract chunk number from GPT-4o mini response
+            chunk_number = 1  # Default fallback
+            try:
+                import re
+                chunk_id_match = re.search(r'CHUNK_ID:\s*(\d+)', gpt_response)
+                if chunk_id_match:
+                    chunk_number = int(chunk_id_match.group(1))
+                else:
+                    # Fallback: look for any numbers in the response
+                    numbers = re.findall(r'\b(\d+)\b', gpt_response)
+                    chunk_number = int(numbers[0]) if numbers else 1
                 
-                # Extract chunk number from LLM response with specific format
-                try:
-                    import re
-                    # Look for CHUNK_ID: X format first
-                    chunk_id_match = re.search(r'CHUNK_ID:\s*(\d+)', llm_response)
-                    if chunk_id_match:
-                        chunk_number = int(chunk_id_match.group(1))
-                    else:
-                        # Fallback: look for any numbers in the response
-                        numbers = re.findall(r'\b(\d+)\b', llm_response)
-                        chunk_number = int(numbers[0]) if numbers else 1
+                # Validate chunk number is within range
+                if not (1 <= chunk_number <= len(chunks)):
+                    chunk_number = 1
                     
-                    # Validate chunk number is within range
-                    if 1 <= chunk_number <= len(chunks):
-                        best_chunk_idx = chunk_number - 1  # Convert to 0-indexed
-                    else:
-                        best_chunk_idx = 0  # Fallback to first chunk
-                        
-                except (ValueError, IndexError, AttributeError):
-                    best_chunk_idx = 0  # Fallback to first chunk
-            else:
-                # LLM failed, use fallback
-                logger.warning("LLM analysis failed, using fallback logic")
-                best_chunk_idx = 0
+            except (ValueError, IndexError, AttributeError):
+                chunk_number = 1  # Fallback to first chunk
             
-            relevant_chunk_number = best_chunk_idx + 1  # 1-indexed
-            relevant_chunk = chunks[best_chunk_idx]
-            
-            # Calculate duration in seconds
-            start_time = relevant_chunk.get('start_time', 0)
-            end_time = relevant_chunk.get('end_time', 0)
+            # Get the selected chunk
+            selected_chunk = chunks[chunk_number - 1]
+            start_time = selected_chunk.get('start_time', 0)
+            end_time = selected_chunk.get('end_time', 0)
             duration = end_time - start_time
             
             return jsonify({
                 'success': True,
-                'relevant_chunk_number': relevant_chunk_number,
-                'relevant_chunk_index': best_chunk_idx,
+                'relevant_chunk_number': chunk_number,
+                'relevant_chunk_index': chunk_number - 1,
                 'chunk_details': {
                     'start_time': start_time,
                     'end_time': end_time,
                     'duration': duration,
-                    'caption': relevant_chunk.get('caption', relevant_chunk.get('text', '')),
-                    'llm_reasoning': llm_response if 'llm_response' in locals() else None
+                    'caption': selected_chunk.get('caption', selected_chunk.get('text', '')),
+                    'gpt_reasoning': gpt_response
                 },
                 'query': query
             })
             
-        except Exception as analysis_error:
-            logger.error(f"Error in chunk analysis: {str(analysis_error)}")
-            # Fallback: return first chunk with duration
-            fallback_chunk = chunks[0] if chunks else {}
+        except Exception as gpt_error:
+            logger.error(f"GPT-4o mini error: {str(gpt_error)}")
+            # Fallback: return first chunk
+            fallback_chunk = chunks[0]
             fallback_start = fallback_chunk.get('start_time', 0)
             fallback_end = fallback_chunk.get('end_time', 0)
             fallback_duration = fallback_end - fallback_start
@@ -2336,7 +2373,7 @@ RESPONSE FORMAT: CHUNK_ID: """
                     'end_time': fallback_end,
                     'duration': fallback_duration,
                     'caption': fallback_chunk.get('caption', fallback_chunk.get('text', '')),
-                    'llm_reasoning': None
+                    'gpt_reasoning': f"GPT-4o mini error, using fallback: {str(gpt_error)}"
                 },
                 'query': query,
                 'fallback': True
@@ -2359,6 +2396,6 @@ if __name__ == '__main__':
     app.run(
         host='0.0.0.0',
         port=8088,
-        debug=False,  # Set to False for production
+        debug=False,  # Disable debug mode to prevent duplicate model loading
         threaded=True
     )

@@ -18,11 +18,11 @@ inference:
   frame_limits:
     # RTX 4090 24GB limits - TESTED AND VERIFIED
     bf16_max_frames: 48      # Without quantization (baseline)
-    int8_max_frames: 120     # With 8-bit quantization (2.5x increase) - VERIFIED WORKING
+    int8_max_frames: 160     # With 8-bit quantization (2.5x increase) - VERIFIED WORKING
     int4_max_frames: 150     # With 4-bit quantization (theoretical) - Architecture limit
     
     # Tested boundaries
-    tensor_limit: 150        # Tensor shape architecture limit
+    tensor_limit: 160        # Tensor shape architecture limit
     memory_limit: 300        # RTX 4090 VRAM exhaustion point
     
     # Automatic frame selection based on quantization
@@ -31,7 +31,7 @@ inference:
   # FPS sampling limits
   fps_limits:
     max_fps_bf16: 1.6       # Max effective FPS without quantization (48 frames / 30s)
-    max_fps_int8: 5.0       # Max effective FPS with 8-bit (150 frames / 30s)
+    max_fps_int8: 4.0       # Max effective FPS with 8-bit (120 frames / 30s)
     max_fps_int4: 6.7       # Max effective FPS with 4-bit (200 frames / 30s)
   
 paths:

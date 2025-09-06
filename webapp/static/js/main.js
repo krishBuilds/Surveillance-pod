@@ -589,7 +589,7 @@ class CaptionGenerator {
         const chunkSize = document.querySelector('#chunk-size');
         const promptInput = document.querySelector('#caption-prompt');
         const modeSelect = document.querySelector('#processing-mode');
-        const outputFormat = document.querySelector('input[name="output-format"]:checked');
+        const outputFormat = document.querySelector('#output-format-select');
 
         if (!videoSelect.value) {
             alert('Please select a video first');
