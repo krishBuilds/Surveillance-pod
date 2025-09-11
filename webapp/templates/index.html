@@ -1,11 +1,20 @@
 {% extends "layout.html" %}
 
-{% block title %}InternVideo2.5 Surveillance System{% endblock %}
+{% block title %}InternVideo2.5 Surveillance{% endblock %}
 
 {% block content %}
-    <!-- Include all page content -->
-    {% include "pages/caption.html" %}
-    {% include "pages/analysis.html" %}
+    <!-- Main Content Area -->
+    <div id="main-content">
+        <!-- Caption Generation Page (Default) -->
+        <div id="caption-page" class="page-section">
+            {% include "pages/caption.html" %}
+        </div>
+
+        <!-- Video Analysis Page -->
+        <div id="analysis-page" class="page-section hidden">
+            {% include "pages/analysis.html" %}
+        </div>
+    </div>
 
     <!-- Global notifications area -->
     <div id="notifications" style="position: fixed; top: 1rem; right: 1rem; z-index: 9999;"></div>
@@ -196,16 +205,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // Welcome message
-    setTimeout(() => {
-        window.showNotification(
-            '<strong>🚀 Welcome to InternVideo2.5 Surveillance!</strong><br>' +
-            'Upload videos and start chatting with AI-powered video understanding.',
-            'info',
-            8000
-        );
-    }, 1000);
-
+  
     // Performance monitoring
     let performanceData = {
         pageLoadTime: performance.now(),
@@ -238,6 +238,138 @@ window.formatFileSize = function(bytes) {
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+};
+
+// Video selection and preview functionality
+window.setupVideoPreview = function() {
+    // Caption page video selection
+    const captionVideoSelect = document.getElementById('caption-video-select');
+    const captionVideoPreview = document.getElementById('caption-video-preview');
+    const captionPreviewPlayer = document.getElementById('caption-preview-player');
+    
+    if (captionVideoSelect) {
+        captionVideoSelect.addEventListener('change', function() {
+            const selectedVideo = this.value;
+            if (selectedVideo) {
+                // Show video preview
+                captionVideoPreview.classList.remove('hidden');
+                captionPreviewPlayer.src = `/serve-video/${selectedVideo}`;
+                captionPreviewPlayer.load();
+                
+                // Hide empty state, show results area (but not processing progress)
+                document.getElementById('empty-state').classList.add('hidden');
+                const resultsDiv = document.getElementById('caption-results');
+                if (resultsDiv) {
+                    resultsDiv.classList.remove('hidden');
+                }
+            } else {
+                // Hide video preview
+                captionVideoPreview.classList.add('hidden');
+                captionPreviewPlayer.src = '';
+                
+                // Show empty state
+                const emptyState = document.getElementById('empty-state');
+                if (emptyState) {
+                    emptyState.classList.remove('hidden');
+                }
+                const resultsDiv = document.getElementById('caption-results');
+                if (resultsDiv) {
+                    resultsDiv.classList.add('hidden');
+                }
+            }
+        });
+    }
+    
+    // Analysis page video selection
+    const analysisVideoSelect = document.getElementById('video-selector');
+    const analysisVideoPreview = document.getElementById('analysis-video-preview');
+    const analysisPreviewPlayer = document.getElementById('analysis-preview-player');
+    
+    if (analysisVideoSelect) {
+        analysisVideoSelect.addEventListener('change', function() {
+            const selectedVideo = this.value;
+            if (selectedVideo) {
+                // Show video preview
+                analysisVideoPreview.classList.remove('hidden');
+                analysisPreviewPlayer.src = `/serve-video/${selectedVideo}`;
+                analysisPreviewPlayer.load();
+                
+                // Enable analyze button
+                document.getElementById('analyze-chunks-btn').disabled = false;
+                
+                // Show video info and results
+                document.getElementById('video-info-display').classList.remove('hidden');
+                document.getElementById('analysis-empty-state').classList.add('hidden');
+                document.getElementById('chunk-analysis-results').classList.remove('hidden');
+            } else {
+                // Hide video preview
+                analysisVideoPreview.classList.add('hidden');
+                analysisPreviewPlayer.src = '';
+                
+                // Disable analyze button
+                document.getElementById('analyze-chunks-btn').disabled = true;
+                
+                // Hide video info and results
+                document.getElementById('video-info-display').classList.add('hidden');
+                document.getElementById('analysis-empty-state').classList.remove('hidden');
+                document.getElementById('chunk-analysis-results').classList.add('hidden');
+            }
+        });
+    }
+};
+
+// Chunk display functions
+window.displayChunks = function(chunks) {
+    const container = document.getElementById('chunks-container');
+    if (!container) return;
+    
+    container.innerHTML = '';
+    
+    chunks.forEach((chunk, index) => {
+        const chunkElement = document.createElement('div');
+        chunkElement.className = 'border-bottom p-2';
+        chunkElement.innerHTML = `
+            <div class="d-flex justify-content-between align-items-start mb-1">
+                <span class="badge bg-primary">Chunk ${index + 1}</span>
+                <small class="text-muted">${window.formatTime(chunk.start_time)} - ${window.formatTime(chunk.end_time)}</small>
+            </div>
+            <div class="small">${chunk.caption || chunk.text || 'No caption available'}</div>
+        `;
+        container.appendChild(chunkElement);
+    });
+};
+
+window.copyAllChunks = function() {
+    const chunks = document.querySelectorAll('#chunks-container > div');
+    let allText = '';
+    chunks.forEach(chunk => {
+        allText += chunk.textContent.trim() + '\n\n';
+    });
+    
+    if (allText) {
+        navigator.clipboard.writeText(allText).then(() => {
+            showNotification('All chunks copied to clipboard!', 'success');
+        });
+    }
+};
+
+window.downloadAllChunks = function() {
+    const chunks = document.querySelectorAll('#chunks-container > div');
+    let allText = '';
+    chunks.forEach(chunk => {
+        allText += chunk.textContent.trim() + '\n\n';
+    });
+    
+    if (allText) {
+        const blob = new Blob([allText], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'video_chunks.txt';
+        a.click();
+        URL.revokeObjectURL(url);
+        showNotification('Chunks downloaded!', 'success');
+    }
 };
 
 window.copyToClipboard = function(text) {

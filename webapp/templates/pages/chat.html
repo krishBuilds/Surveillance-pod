@@ -159,14 +159,14 @@
         </div>
         <div class="card-body">
             <div class="grid grid-3">
-                <button class="btn btn-outline example-query" data-query="Describe what happens in this video">
-                    📝 Describe the video
+                <button class="btn btn-outline example-query" data-query="What happens in this video?">
+                    📝 What happens?
                 </button>
                 <button class="btn btn-outline example-query" data-query="What are the main characters doing?">
                     👥 Analyze characters
                 </button>
-                <button class="btn btn-outline example-query" data-query="What happens at the beginning, middle, and end?">
-                    🎭 Story structure
+                <button class="btn btn-outline example-query" data-query="What's the story?">
+                    🎭 What's the story?
                 </button>
                 <button class="btn btn-outline example-query" data-query="Are there any interesting visual details?">
                     🎨 Visual analysis
@@ -204,7 +204,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (messageInput && submitBtn) {
             messageInput.disabled = false;
             submitBtn.disabled = false;
-            messageInput.placeholder = "Ask about the video... (e.g., 'What happens at 30 seconds?')";
+            messageInput.placeholder = "Ask about the video...";
         }
     }
 

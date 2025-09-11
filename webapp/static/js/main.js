@@ -86,15 +86,18 @@ class SurveillanceApp {
     }
 
     navigateToPage(page) {
-        // Hide all page content
-        document.querySelectorAll('.page-content').forEach(content => {
+        // Hide all page content with smooth transition
+        document.querySelectorAll('.page-section').forEach(content => {
             content.classList.add('hidden');
         });
 
-        // Show selected page
+        // Show selected page with smooth transition
         const targetPage = document.querySelector(`#${page}-page`);
         if (targetPage) {
-            targetPage.classList.remove('hidden');
+            // Small delay to ensure smooth transition
+            setTimeout(() => {
+                targetPage.classList.remove('hidden');
+            }, 50);
         }
 
         // Load page-specific content if needed
@@ -124,12 +127,26 @@ class SurveillanceApp {
         if (window.CaptionGenerator) {
             window.CaptionGenerator.init();
         }
+        
+        // Setup video preview functionality
+        setTimeout(() => {
+            if (window.setupVideoPreview) {
+                window.setupVideoPreview();
+            }
+        }, 100);
     }
 
     loadAnalysisPage() {
         // Initialize analysis functionality
         console.log('Analysis page loaded');
         this.setupAnalysisPage();
+        
+        // Setup video preview functionality
+        setTimeout(() => {
+            if (window.setupVideoPreview) {
+                window.setupVideoPreview();
+            }
+        }, 100);
     }
 
     async setupAnalysisPage() {
@@ -277,37 +294,47 @@ class SurveillanceApp {
         showNotification('🔍 Starting chunk analysis...', 'info', 3000);
         
         try {
+            // First, fetch the stored captions for this video
+            const captionsResponse = await fetch(`/api/video-caption/${encodeURIComponent(videoFile)}`);
+            const captionsData = await captionsResponse.json();
+            
+            if (!captionsData.success || !captionsData.data || !captionsData.data.chunks) {
+                throw new Error('No caption chunks found for this video');
+            }
+            
+            const chunks = captionsData.data.chunks;
+            
             const response = await fetch('/api/find-relevant-chunk', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    video_file: videoFile,
-                    query: query
+                    query: query,
+                    chunks: chunks
                 })
             });
             
             const result = await response.json();
             const processingTime = analysisTimer.end();
             
-            if (result.chunk_info) {
+            if (result.success && result.chunk_details) {
                 // Hide loading and show results
                 if (loadingDiv) loadingDiv.style.display = 'none';
                 if (resultsDiv) resultsDiv.style.display = 'block';
                 
                 // Calculate and display duration properly
-                const startTime = result.chunk_info.start_time || 0;
-                const endTime = result.chunk_info.end_time || 0;
+                const startTime = result.chunk_details.start_time || 0;
+                const endTime = result.chunk_details.end_time || 0;
                 const duration = endTime - startTime;
                 
                 // Update result displays with proper formatting
                 const elements = {
-                    'result-chunk-number': result.chunk_info.chunk_id || '-',
+                    'result-chunk-number': result.relevant_chunk_number || '-',
                     'result-start-time': this.formatTime(startTime),
                     'result-end-time': this.formatTime(endTime),
                     'result-duration': duration.toFixed(1),
-                    'result-caption': result.chunk_info.caption || '-',
+                    'result-caption': result.chunk_details.caption || '-',
                     'analysis-time': formatDuration(processingTime)
                 };
                 
@@ -323,7 +350,7 @@ class SurveillanceApp {
                     4000
                 );
             } else {
-                throw new Error('No chunk found');
+                throw new Error(result.error || 'No chunk found or analysis failed');
             }
         } catch (error) {
             console.error('Error finding relevant chunk:', error);
@@ -658,9 +685,6 @@ class CaptionGenerator {
                         <!-- Chunks will be added here as they complete -->
                     </div>
                     
-                    <div id="final-caption" class="hidden mt-4">
-                        <!-- Final combined caption will appear here -->
-                    </div>
                 </div>
             </div>
         `;
@@ -744,20 +768,6 @@ class CaptionGenerator {
                 // Calculate total processing time
                 const finalTotalTime = this.captionStartTime ? performance.now() - this.captionStartTime : 0;
                 
-                // Show final combined caption with timing
-                const finalDiv = document.querySelector('#final-caption');
-                finalDiv.innerHTML = `
-                    <div class="final-caption-header">
-                        <h3>✅ Final Caption</h3>
-                        <div class="caption-stats">
-                            ${data.caption.length} characters • ${data.chunks_processed} chunks • ${data.total_frames} frames
-                            <br>
-                            <span class="timing-badge">⏱️ Total: ${formatDuration(finalTotalTime)}</span>
-                        </div>
-                    </div>
-                    <div class="final-caption-content">${data.caption}</div>
-                `;
-                finalDiv.classList.remove('hidden');
                 progressText.textContent = `✅ Completed! ${data.chunks_processed} chunks in ${formatDuration(finalTotalTime)}`;
                 progressFill.style.width = '100%';
                 

@@ -8,7 +8,13 @@
     <!-- Favicon -->
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
     
-    <!-- CSS -->
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.2/font/bootstrap-icons.css">
+    
+    <!-- Custom CSS -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
     
     <!-- Font Awesome for icons -->
@@ -16,61 +22,50 @@
     
     {% block extra_css %}{% endblock %}
 </head>
-<body>
-    <!-- Sidebar -->
-    <nav class="sidebar">
-        <div class="sidebar-header">
-            <h1 class="sidebar-title">
-                <i class="fas fa-video"></i>
-            </h1>
-        </div>
-        
-        <div class="sidebar-nav">
-            <div class="nav-item">
-                <a href="#" class="nav-link active" data-page="caption" title="Caption Generator">
-                    <i class="fas fa-closed-captioning nav-icon"></i>
-                    <span class="nav-text">Caption Generator</span>
-                </a>
-            </div>
-            
-            <div class="nav-item">
-                <a href="#" class="nav-link" data-page="analysis" title="Video Analysis">
-                    <i class="fas fa-chart-line nav-icon"></i>
-                    <span class="nav-text">Video Analysis</span>
-                </a>
-            </div>
-            
-            <hr style="margin: 0.5rem; border-color: var(--border-color);">
-            
-            <div class="nav-item">
-                <div style="padding: 0.5rem; text-align: center;">
-                    <span id="system-status" class="status-indicator status-info" title="System Status" style="font-size: 0.75rem;">●</span>
+<body class="bg-light">
+    <!-- Compact Layout -->
+    <div class="d-flex vh-100">
+        <!-- Sidebar -->
+        <div class="sidebar-compact bg-white border-end">
+            <div class="p-3 border-bottom">
+                <div class="d-flex align-items-center">
+                    <i class="bi bi-camera-video text-primary me-2"></i>
+                    <span class="fw-bold text-primary">IV2.5</span>
                 </div>
             </div>
             
+            <nav class="nav flex-column p-2">
+                <a class="nav-link active d-flex align-items-center p-2 mb-1 rounded" href="#" data-page="caption">
+                    <i class="bi bi-badge-cc me-2"></i>
+                    <span class="small">Caption</span>
+                </a>
+                <a class="nav-link d-flex align-items-center p-2 mb-1 rounded" href="#" data-page="analysis">
+                    <i class="bi bi-graph-up me-2"></i>
+                    <span class="small">Analysis</span>
+                </a>
+            </nav>
+            
+            <div class="mt-auto p-2">
+                <div class="status-badge status-success">
+                    <i class="bi bi-circle-fill"></i>
+                    Ready
+                </div>
+            </div>
         </div>
-    </nav>
 
-    <!-- Main Content -->
-    <main class="main-content">
-        <!-- Mobile Sidebar Toggle -->
-        <button class="sidebar-toggle btn btn-outline" style="display: none; margin-bottom: 1rem;">
-            <i class="fas fa-bars"></i>
-        </button>
+        <!-- Main Content -->
+        <main class="flex-grow-1 overflow-auto">
+            <div class="p-3">
+                {% block content %}{% endblock %}
+            </div>
+        </main>
+    </div>
 
-        {% block content %}{% endblock %}
-    </main>
-
-    <!-- JavaScript -->
+    <!-- Bootstrap JS Bundle -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Custom JavaScript -->
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
     {% block extra_js %}{% endblock %}
-
-    <!-- Mobile responsive script -->
-    <script>
-        // Show sidebar toggle on mobile
-        if (window.innerWidth <= 768) {
-            document.querySelector('.sidebar-toggle').style.display = 'inline-flex';
-        }
-    </script>
 </body>
 </html>

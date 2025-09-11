@@ -30,6 +30,9 @@ from simple_caption_storage import SimpleCaptionStorage
 from openai import OpenAI
 import yaml
 
+# Environment detection - default to development mode
+IS_DEVELOPMENT = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('DEV_MODE') == '1' or True
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'internvideo-surveillance-app'
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "inputs/videos")
@@ -40,6 +43,15 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Development settings
+if IS_DEVELOPMENT:
+    app.config['DEBUG'] = True
+    app.config['TEMPLATES_AUTO_RELOAD'] = True
+    logger.info("🔧 DEVELOPMENT MODE ENABLED")
+    logger.info("   - Auto-reload enabled")
+    logger.info("   - Debug mode active")
+    logger.info("   - Model persistence enabled")
 
 # Default video path
 DEFAULT_VIDEO = "inputs/videos/bigbuckbunny.mp4"
@@ -98,6 +110,9 @@ def get_enhanced_manager():
     if enhanced_manager is None:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         logger.info("=== INITIALIZING ENHANCED MODEL MANAGER ===")
+        
+        if IS_DEVELOPMENT:
+            logger.info("🔧 Development mode - optimizing model loading for persistence")
         logger.info(f"Base directory: {base_dir}")
         
         model_path = os.path.join(base_dir, "models/InternVideo2_5")
@@ -153,6 +168,10 @@ def get_enhanced_manager():
 def startup_cleanup():
     """Clean up memory and cache on app startup while keeping model loaded"""
     logger.info("=== WEBAPP STARTUP CLEANUP ===")
+    
+    if IS_DEVELOPMENT:
+        logger.info("🔧 Development startup - optimizing for persistence")
+    
     try:
         # Clear any existing CUDA cache
         if torch.cuda.is_available():
@@ -399,36 +418,12 @@ def generate_caption():
             video_info = manager.model_manager.get_video_info(video_path)
             video_duration = video_info.get('duration', 0)
             
-            # Create temporal analysis prompt for comprehensive video description
-            temporal_prompt = f"""COMPREHENSIVE VIDEO ANALYSIS TASK:
+            # Create simple, natural prompt for video description
+            temporal_prompt = f"""Describe what happens in this {video_duration:.1f} second video in a natural, flowing narrative style.
 
-You are analyzing {video_duration:.1f} seconds of video content with frame-by-frame analysis.
+Write a clear, engaging description that tells the story of what unfolds throughout the video. Focus on the main actions, characters, and key moments without using technical formatting or frame numbers.
 
-Generate a detailed, comprehensive description of what happens throughout this entire video.
-
-REQUIRED OUTPUT FORMAT:
-Provide a complete video analysis with frame-by-frame details:
-
-1. OPENING SEQUENCE (Beginning): What happens at the start?
-2. EARLY DEVELOPMENT (First quarter): How does the story begin to unfold?
-3. MIDDLE SECTION (Halfway through): What key events occur?
-4. LATER DEVELOPMENTS (Third quarter): How does the story progress?
-5. CONCLUSION (Final part): How does the video end?
-
-For EACH section, provide:
-- Frame references (e.g., "Frame1:", "Frame25:", "Frame50-75:")
-- Detailed descriptions of actions, characters, settings
-- Key visual details and transitions
-- Emotional tone and narrative progression
-
-EXAMPLE FORMAT:
-Frame1: [Opening scene description]
-Frame15: [Early action description]
-Frame45: [Key moment description]
-Frame80: [Progression description]
-Frame120: [Conclusion description]
-
-Focus on providing a comprehensive, frame-by-frame analysis of the entire video narrative."""
+Keep the description conversational and easy to read, as if you're telling someone what you saw in the video."""
 
             # Process entire video with temporal analysis
             caption_result = process_temporal_video_segment(
@@ -998,25 +993,14 @@ def process_video_for_caption_streaming(manager, video_path, video_file, fps_sam
             try:
                 chunk_start_time = time.time()
                 
-                # Create temporal analysis prompt for comprehensive video description
-                temporal_prompt = f"""COMPREHENSIVE VIDEO ANALYSIS TASK:
+                # Create simple, natural prompt for video chunk description
+                temporal_prompt = f"""Describe what happens in this {chunk_duration:.1f} second video segment in a natural, flowing narrative style.
 
-You are analyzing {chunk_duration:.1f} seconds of video content with frame-by-frame analysis.
+Write a clear, engaging description that tells the story of what unfolds in this segment. Focus on the main actions, characters, and key moments without using technical formatting or frame numbers.
 
-Generate a detailed, comprehensive description of what happens throughout this entire video segment.
+Keep the description conversational and easy to read, as if you're telling someone what you saw in this part of the video.
 
-REQUIRED OUTPUT FORMAT:
-Provide a complete video analysis with frame-by-frame details:
-
-For EACH section, provide:
-- Frame references (e.g., "Frame1:", "Frame15:", "Frame50-75:")
-- Detailed descriptions of actions, characters, settings
-- Key visual details and transitions
-- Emotional tone and narrative progression
-
-FOCUS: {prompt}
-
-IMPORTANT: Reference specific frames like "Frame1:", "Frame15:", etc. Do not use timestamps."""
+Focus: {prompt}"""
                 
                 result = process_temporal_video_segment(
                     manager.model_manager,
@@ -2243,25 +2227,14 @@ def temporal_analysis():
                     
                     logger.info(f"[{request_id}] Segment analysis params: {num_frames} frames, {fps_sampling:.2f} FPS")
                     
-                    # Create temporal analysis prompt for comprehensive video description (same as caption generator)
-                    temporal_prompt = f"""COMPREHENSIVE VIDEO ANALYSIS TASK:
+                    # Create simple, natural prompt for video segment description
+                    temporal_prompt = f"""Describe what happens in this {segment_duration:.1f} second video segment in a natural, flowing narrative style.
 
-You are analyzing {segment_duration:.1f} seconds of video content with frame-by-frame analysis.
+Write a clear, engaging description that tells the story of what unfolds in this segment. Focus on the main actions, characters, and key moments without using technical formatting or frame numbers.
 
-Generate a detailed, comprehensive description of what happens throughout this entire video segment.
+Keep the description conversational and easy to read, as if you're telling someone what you saw in this part of the video.
 
-REQUIRED OUTPUT FORMAT:
-Provide a complete video analysis with frame-by-frame details:
-
-For EACH section, provide:
-- Frame references (e.g., "Frame1:", "Frame15:", "Frame50-75:")
-- Detailed descriptions of actions, characters, settings
-- Key visual details and transitions
-- Emotional tone and narrative progression
-
-FOCUS: {query}
-
-IMPORTANT: Reference specific frames like "Frame1:", "Frame15:", etc. Do not use timestamps."""
+Focus: {query}"""
 
                     # Process video segment with InternVideo2.5 using custom temporal analysis generation
                     try:
@@ -2682,12 +2655,37 @@ if __name__ == '__main__':
     print(f"📊 Max capacity: 160 frames")
     print(f"💬 Features: Chat, Streaming, Video Caching")
     
+    if IS_DEVELOPMENT:
+        print("🔧 DEVELOPMENT MODE:")
+        print("   - Model persistence enabled")
+        print("   - Auto-reload for UI changes")
+        print("   - Hot-reload for code changes")
+        print("   - Enhanced logging")
+        
+        # Use development settings
+        debug_mode = True
+        use_reloader = True
+        extra_files = ['templates/', 'static/', 'simple_caption_storage.py']
+    else:
+        print("🏭 PRODUCTION MODE:")
+        print("   - Optimized for stability")
+        debug_mode = False
+        use_reloader = False
+        extra_files = None
+    
     # Perform startup cleanup
     startup_cleanup()
     
-    app.run(
-        host='0.0.0.0',
-        port=8088,
-        debug=False,  # Disable debug mode to prevent duplicate model loading
-        threaded=True
-    )
+    # Configure Flask app run settings
+    run_kwargs = {
+        'host': '0.0.0.0',
+        'port': 8088,
+        'debug': debug_mode,
+        'threaded': True,
+        'use_reloader': use_reloader
+    }
+    
+    if extra_files:
+        run_kwargs['extra_files'] = extra_files
+    
+    app.run(**run_kwargs)
