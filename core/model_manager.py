@@ -190,8 +190,114 @@ class ModelManager:
                 **model_kwargs
             ).eval()
             
+            # Apply comprehensive fix for transformers v4.50+ GenerationMixin compatibility
+            if hasattr(self.model, 'language_model'):
+                llm = self.model.language_model
+                logger.info(f"Language model type: {type(llm)}")
+                logger.info(f"Language model class: {llm.__class__}")
+                
+                # Instead of just adding methods to class, ensure the instance inherits from GenerationMixin
+                from transformers.generation.utils import GenerationMixin
+                
+                # Check if already inherits from GenerationMixin
+                if not isinstance(llm, GenerationMixin):
+                    logger.info("Language model does not inherit from GenerationMixin - applying fix")
+                    
+                    # Create a new class that inherits from both the current class and GenerationMixin
+                    current_class = llm.__class__
+                    new_class_name = f"Fixed{current_class.__name__}"
+                    
+                    # Use proper multiple inheritance with forward method compatibility fix
+                    class FixedLLMClass(GenerationMixin, current_class):
+                        def forward(self, *args, **kwargs):
+                            # Handle cache_position parameter compatibility for transformers 4.38+
+                            if 'cache_position' in kwargs:
+                                # Remove cache_position completely as it's not supported by InternLM2
+                                del kwargs['cache_position']
+                                logger.debug("Removed cache_position parameter for InternLM2 compatibility")
+                            
+                            return super().forward(*args, **kwargs)
+                    
+                    # Also patch the original forward method directly as a fallback
+                    original_forward = llm.forward
+                    def patched_forward(self, *args, **kwargs):
+                        if 'cache_position' in kwargs:
+                            del kwargs['cache_position']
+                            logger.debug("Patched forward: removed cache_position parameter")
+                        
+                        # Fix InternLM2 past_key_values shape access bug (line 890 in modeling_internlm2.py)
+                        # The issue is that past_key_values can be a structure with None elements
+                        # but the original code assumes past_key_values[0][0] is not None
+                        if 'past_key_values' in kwargs:
+                            pkv = kwargs['past_key_values']
+                            if pkv is not None:
+                                # Check if past_key_values contains None elements that would cause shape errors
+                                try:
+                                    # Try to access the structure that would be accessed at line 890
+                                    if (isinstance(pkv, (list, tuple)) and len(pkv) > 0 and 
+                                        isinstance(pkv[0], (list, tuple)) and len(pkv[0]) > 0 and 
+                                        pkv[0][0] is not None):
+                                        # Structure is valid, keep it
+                                        pass
+                                    else:
+                                        # Structure is invalid or contains None, remove it
+                                        del kwargs['past_key_values']
+                                        logger.debug("Patched forward: removed malformed past_key_values to prevent shape error")
+                                except (IndexError, TypeError):
+                                    # Structure is malformed, remove it
+                                    del kwargs['past_key_values']
+                                    logger.debug("Patched forward: removed malformed past_key_values structure")
+                            else:
+                                # past_key_values is None, remove it
+                                del kwargs['past_key_values']
+                                logger.debug("Patched forward: removed None past_key_values parameter")
+                        
+                        return original_forward(*args, **kwargs)
+                    
+                    llm.forward = patched_forward.__get__(llm, llm.__class__)
+                    
+                    # Change the instance's class
+                    llm.__class__ = FixedLLMClass
+                    
+                    logger.info(f"Successfully changed language model class to inherit from GenerationMixin")
+                    logger.info(f"New class MRO: {[cls.__name__ for cls in FixedLLMClass.__mro__]}")
+                    
+                    # Verify the fix worked
+                    test_methods = ['generate', '_prepare_generation_config']
+                    for method in test_methods:
+                        if hasattr(llm, method):
+                            logger.info(f"✓ Method {method} is now available")
+                        else:
+                            logger.error(f"✗ Method {method} is still missing!")
+                    
+                    # Ensure generation_config is properly initialized
+                    if not hasattr(llm, 'generation_config') or llm.generation_config is None:
+                        from transformers import GenerationConfig
+                        try:
+                            # Try to create from model config
+                            if hasattr(llm, 'config') and llm.config is not None:
+                                llm.generation_config = GenerationConfig.from_model_config(llm.config)
+                                logger.info("✓ Created generation_config from model config")
+                            else:
+                                # Create default generation config
+                                llm.generation_config = GenerationConfig()
+                                logger.info("✓ Created default generation_config")
+                        except Exception as gen_config_error:
+                            logger.warning(f"Failed to create generation_config: {gen_config_error}")
+                            llm.generation_config = GenerationConfig()
+                            logger.info("✓ Created fallback default generation_config")
+                    else:
+                        logger.info("✓ generation_config already exists")
+                            
+                else:
+                    logger.info("Language model already inherits from GenerationMixin")
+            
+            # Clear any existing shared model cache to ensure fresh instance
+            ModelManager._shared_model = None
+            ModelManager._shared_tokenizer = None
+            
             # Store in shared variables
-            ModelManager._shared_model = self.model
+            ModelManager._shared_model = self.model  
             ModelManager._shared_tokenizer = self.tokenizer
             ModelManager._shared_model_path = self.model_path
             
@@ -215,7 +321,9 @@ class ModelManager:
         num_frames: int = None,
         max_tokens: int = 1024,
         fps_sampling: float = None,
-        time_bound: float = None
+        time_bound: float = None,
+        start_time: float = None,
+        end_time: float = None
     ) -> Dict:
         """
         Process a video with the model using real inference
@@ -246,19 +354,21 @@ class ModelManager:
             "prompt": prompt,
             "num_frames": num_frames,
             "response": "",
-            "error": None
+            "error": None,
+            "success": False
         }
         
         try:
             import time
-            start_time = time.time()
+            processing_start_time = time.time()
             
             # Load and process video using decord (like in demo)
             logger.info(f"Loading video: {video_path}")
             video_load_start = time.time()
             pixel_values, num_patches_list = self._load_video_for_inference(
                 video_path, num_segments=num_frames, max_num=1,
-                fps_sampling=fps_sampling, time_bound=time_bound
+                fps_sampling=fps_sampling, time_bound=time_bound,
+                start_time=start_time, end_time=end_time
             )
             video_load_time = time.time() - video_load_start
             logger.info(f"Video loading completed in {video_load_time:.2f} seconds")
@@ -290,22 +400,51 @@ class ModelManager:
             logger.info(f"Running inference on {len(num_patches_list)} frames...")
             inference_start = time.time()
             
-            # Run actual inference
-            with torch.no_grad():
-                output, _ = self.model.chat(
-                    self.tokenizer,
-                    pixel_values,
-                    question,
-                    generation_config,
-                    num_patches_list=num_patches_list,
-                    history=None,
-                    return_history=True
-                )
+            # Debug generation_config before model.chat call
+            logger.info(f"Generation config type: {type(generation_config)}")
+            logger.info(f"Generation config content: {generation_config}")
+            if hasattr(self.model, 'language_model'):
+                llm = self.model.language_model
+                logger.info(f"LLM generation_config: {getattr(llm, 'generation_config', 'MISSING')}")
+                logger.info(f"LLM has _from_model_config: {hasattr(getattr(llm, 'generation_config', None), '_from_model_config') if hasattr(llm, 'generation_config') else False}")
+            
+            # Run actual inference with comprehensive debugging
+            logger.info(f"About to call model.chat with:")
+            logger.info(f"  - pixel_values type: {type(pixel_values)}")
+            logger.info(f"  - pixel_values shape: {pixel_values.shape if hasattr(pixel_values, 'shape') else 'No shape'}")
+            logger.info(f"  - question length: {len(question)}")
+            logger.info(f"  - num_patches_list: {num_patches_list[:5] if len(num_patches_list) > 5 else num_patches_list}")
+            logger.info(f"  - generation_config keys: {list(generation_config.keys())}")
+            
+            try:
+                with torch.no_grad():
+                    output, history = self.model.chat(
+                        self.tokenizer,
+                        pixel_values,
+                        question,
+                        generation_config,
+                        num_patches_list=num_patches_list,
+                        history=None,
+                        return_history=True
+                    )
+                
+                logger.info(f"Model.chat call successful!")
+                logger.info(f"  - output type: {type(output)}")
+                logger.info(f"  - output length: {len(output) if hasattr(output, '__len__') else 'No length'}")
+                logger.info(f"  - history type: {type(history)}")
+                
+            except Exception as chat_error:
+                logger.error(f"Error in model.chat call: {chat_error}")
+                logger.error(f"Error type: {type(chat_error)}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
+                raise
             
             inference_time = time.time() - inference_start
-            total_time = time.time() - start_time
+            total_time = time.time() - processing_start_time
             
             result["response"] = output
+            result["success"] = True  # Mark as successful
             result["timing"] = {
                 "video_loading_time": video_load_time,
                 "inference_time": inference_time,
@@ -373,7 +512,8 @@ class ModelManager:
             "image_path": image_path,
             "prompt": prompt,
             "response": "",
-            "error": None
+            "error": None,
+            "success": False
         }
         
         try:
@@ -418,6 +558,7 @@ class ModelManager:
                 )
             
             result["response"] = output
+            result["success"] = True  # Mark as successful
             logger.info("Image inference completed successfully")
             
         except Exception as e:
@@ -635,7 +776,9 @@ class ModelManager:
         num_segments=32, 
         get_frame_by_duration=False,
         fps_sampling=None,
-        time_bound=None
+        time_bound=None,
+        start_time=None,
+        end_time=None
     ):
         """Load and preprocess video for inference using decord with timestamp tracking"""
         vr = VideoReader(video_path, ctx=cpu(0), num_threads=1)
@@ -649,11 +792,30 @@ class ModelManager:
         transform = self._build_transform(input_size=input_size)
         
         # Handle frame sampling logic
-        # Priority 1: If time_bound is specified, limit analysis to first N seconds
-        # Priority 2: If fps_sampling is specified, sample at that FPS rate
-        # Priority 3: Distribute num_segments evenly across the selected duration
+        # Priority 1: If start_time and end_time are specified, analyze specific segment
+        # Priority 2: If time_bound is specified, limit analysis to first N seconds
+        # Priority 3: If fps_sampling is specified, sample at that FPS rate
+        # Priority 4: Distribute num_segments evenly across the selected duration
         
-        if time_bound:
+        if start_time is not None and end_time is not None:
+            # Extract specific segment (start_time to end_time)
+            start_frame = max(0, int(start_time * fps))
+            end_frame = min(max_frame, int(end_time * fps))
+            segment_duration = end_time - start_time
+            
+            logger.info(f"Segment extraction: {start_time}s-{end_time}s ({segment_duration}s)")
+            logger.info(f"Frame range: {start_frame} to {end_frame} (of {max_frame} total)")
+            
+            if fps_sampling:
+                # Sample at specified FPS within segment
+                target_frames = min(int(fps_sampling * segment_duration), num_segments)
+                frame_indices = np.linspace(start_frame, end_frame, target_frames).astype(int)
+                logger.info(f"Segment FPS sampling: {fps_sampling} FPS for {segment_duration:.1f}s = {target_frames} frames")
+            else:
+                # Distribute num_segments evenly within segment
+                frame_indices = np.linspace(start_frame, end_frame, num_segments).astype(int)
+                logger.info(f"Distributing {num_segments} frames evenly within segment {start_time}s-{end_time}s")
+        elif time_bound:
             # Limit to first N seconds of video
             max_time_frame = min(int(time_bound * fps) - 1, max_frame)
             logger.info(f"Time bound {time_bound}s limits to frame {max_time_frame} (of {max_frame})")
@@ -691,20 +853,60 @@ class ModelManager:
             logger.info(f"Distributing {num_segments} frames evenly across entire video")
         
         for frame_index in frame_indices:
-            img = Image.fromarray(vr[frame_index].asnumpy()).convert("RGB")
-            img = self._dynamic_preprocess(
-                img, image_size=input_size, use_thumbnail=True, max_num=max_num
-            )
-            pixel_values = [transform(tile) for tile in img]
-            pixel_values = torch.stack(pixel_values)
-            num_patches_list.append(pixel_values.shape[0])
-            pixel_values_list.append(pixel_values)
-            
-            # Calculate and store timestamp for this frame
-            timestamp = float(frame_index) / fps
-            frame_timestamps.append(timestamp)
+            try:
+                img = Image.fromarray(vr[frame_index].asnumpy()).convert("RGB")
+                processed_img = self._dynamic_preprocess(
+                    img, image_size=input_size, use_thumbnail=True, max_num=max_num
+                )
+                
+                # Add validation for processed image
+                if not processed_img or len(processed_img) == 0:
+                    logger.error(f"Dynamic preprocess returned empty result for frame {frame_index}")
+                    continue
+                
+                # Transform each tile with error handling
+                transformed_tiles = []
+                for i, tile in enumerate(processed_img):
+                    if tile is None:
+                        logger.error(f"Tile {i} is None for frame {frame_index}")
+                        continue
+                    try:
+                        transformed_tile = transform(tile)
+                        if transformed_tile is not None:
+                            transformed_tiles.append(transformed_tile)
+                    except Exception as tile_error:
+                        logger.error(f"Transform failed for tile {i} in frame {frame_index}: {tile_error}")
+                        continue
+                
+                if not transformed_tiles:
+                    logger.error(f"No valid transformed tiles for frame {frame_index}")
+                    continue
+                
+                pixel_values = torch.stack(transformed_tiles)
+                if pixel_values is None:
+                    logger.error(f"torch.stack returned None for frame {frame_index}")
+                    continue
+                
+                num_patches_list.append(pixel_values.shape[0])
+                pixel_values_list.append(pixel_values)
+                
+                # Calculate and store timestamp for this frame
+                timestamp = float(frame_index) / fps
+                frame_timestamps.append(timestamp)
+                
+            except Exception as frame_error:
+                logger.error(f"Error processing frame {frame_index}: {frame_error}")
+                continue
+        
+        # Validate that we have processed frames
+        if not pixel_values_list:
+            raise RuntimeError("No frames were successfully processed - all frames failed during preprocessing")
+        
+        if not num_patches_list:
+            raise RuntimeError("No patches were generated - frame processing failed")
         
         pixel_values = torch.cat(pixel_values_list)
+        logger.info(f"Successfully processed {len(pixel_values_list)} frames with {len(num_patches_list)} patches")
         
         # Store frame timestamps for temporal queries
         self.current_frame_timestamps = frame_timestamps

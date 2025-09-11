@@ -1,5 +1,46 @@
 // InternVideo2.5 Surveillance - Main JavaScript
 
+// Add the formatDuration function to the global scope for use in event handlers
+function formatDuration(milliseconds) {
+    if (milliseconds < 1000) return `${milliseconds}ms`;
+    const seconds = milliseconds / 1000;
+    if (seconds < 60) return `${seconds.toFixed(1)}s`;
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+// Add the showNotification function to the global scope
+function showNotification(message, type = 'info', duration = 5000) {
+    const notification = document.createElement('div');
+    notification.className = `notification notification-${type}`;
+    notification.textContent = message;
+    notification.style.position = 'fixed';
+    notification.style.top = '20px';
+    notification.style.right = '20px';
+    notification.style.zIndex = '10000';
+    notification.style.padding = '12px 20px';
+    notification.style.borderRadius = '8px';
+    notification.style.maxWidth = '300px';
+    notification.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)';
+    
+    // Set background color based on type
+    const colors = {
+        info: '#3498db',
+        success: '#27ae60',
+        error: '#e74c3c',
+        warning: '#f39c12'
+    };
+    notification.style.backgroundColor = colors[type] || colors.info;
+    notification.style.color = 'white';
+    
+    document.body.appendChild(notification);
+    
+    setTimeout(() => {
+        notification.remove();
+    }, duration);
+}
+
 class SurveillanceApp {
     constructor() {
         this.init();
@@ -36,10 +77,10 @@ class SurveillanceApp {
     }
 
     loadInitialPage() {
-        // Load the default page (chat interface)
-        const defaultNavItem = document.querySelector('.nav-link[data-page="chat"]');
+        // Load the default page (caption interface)
+        const defaultNavItem = document.querySelector('.nav-link[data-page="caption"]');
         if (defaultNavItem) {
-            this.navigateToPage('chat');
+            this.navigateToPage('caption');
             this.setActiveNavItem(defaultNavItem);
         }
     }
@@ -58,9 +99,6 @@ class SurveillanceApp {
 
         // Load page-specific content if needed
         switch (page) {
-            case 'chat':
-                this.loadChatPage();
-                break;
             case 'caption':
                 this.loadCaptionPage();
                 break;
@@ -80,13 +118,7 @@ class SurveillanceApp {
         activeItem.classList.add('active');
     }
 
-    loadChatPage() {
-        // Initialize chat functionality
-        if (window.ChatInterface) {
-            window.ChatInterface.init();
-        }
-    }
-
+    
     loadCaptionPage() {
         // Initialize caption generation functionality
         if (window.CaptionGenerator) {
@@ -97,19 +129,320 @@ class SurveillanceApp {
     loadAnalysisPage() {
         // Initialize analysis functionality
         console.log('Analysis page loaded');
+        this.setupAnalysisPage();
     }
 
-    showNotification(message, type = 'info') {
+    async setupAnalysisPage() {
+        // Load stored captions for video selection
+        await this.loadStoredCaptionsForAnalysis();
+        
+        // Setup event listeners
+        const videoSelector = document.getElementById('video-selector');
+        const analyzeBtn = document.getElementById('analyze-chunks-btn');
+        
+        if (videoSelector) {
+            videoSelector.addEventListener('change', async (e) => {
+                const videoFile = e.target.value;
+                if (videoFile) {
+                    await this.displayVideoInfoForAnalysis(videoFile);
+                    await this.loadChunkDataForAnalysis(videoFile);
+                    if (analyzeBtn) analyzeBtn.disabled = false;
+                } else {
+                    this.hideVideoInfoDisplay();
+                    if (analyzeBtn) analyzeBtn.disabled = true;
+                }
+            });
+        }
+
+        if (analyzeBtn) {
+            analyzeBtn.addEventListener('click', async () => {
+                const videoFile = videoSelector?.value;
+                const query = document.getElementById('chunk-query')?.value?.trim();
+                if (videoFile && query) {
+                    await this.findRelevantChunk(videoFile, query);
+                }
+            });
+        }
+    }
+
+    async loadStoredCaptionsForAnalysis() {
+        try {
+            const response = await fetch('/api/stored-captions');
+            const result = await response.json();
+            const videos = result.videos || [];
+            
+            const selector = document.getElementById('video-selector');
+            if (selector) {
+                selector.innerHTML = '<option value="">Choose a video with captions...</option>';
+                videos.forEach(video => {
+                    const option = document.createElement('option');
+                    option.value = video.video_file;
+                    const createdDate = new Date(video.created_at).toLocaleDateString();
+                    option.textContent = `${video.video_file} (${createdDate})`;
+                    selector.appendChild(option);
+                });
+            }
+        } catch (error) {
+            console.error('Error loading stored captions:', error);
+        }
+    }
+
+    async displayVideoInfoForAnalysis(videoFile) {
+        try {
+            const response = await fetch(`/api/video-caption/${videoFile}`);
+            const result = await response.json();
+            const data = result.data || result; // Handle nested data structure
+            
+            if (data && result.success !== false) {
+                const infoDisplay = document.getElementById('video-info-display');
+                if (infoDisplay) {
+                    infoDisplay.style.display = 'block';
+                    
+                    // Update chunk size
+                    const chunkSizeDisplay = document.getElementById('chunk-size-display');
+                    if (chunkSizeDisplay) {
+                        const chunkDuration = data.chunk_duration || 48;
+                        chunkSizeDisplay.textContent = `${chunkDuration}s`;
+                    }
+                    
+                    // Update total chunks
+                    const totalChunksDisplay = document.getElementById('total-chunks-display');
+                    if (totalChunksDisplay && data.chunks) {
+                        totalChunksDisplay.textContent = data.chunks.length;
+                    }
+                    
+                    // Update FPS
+                    const fpsDisplay = document.getElementById('fps-display');
+                    if (fpsDisplay) {
+                        fpsDisplay.textContent = `${data.fps || 2.0} FPS`;
+                    }
+                    
+                    // Update duration with proper formatting
+                    const durationDisplay = document.getElementById('duration-display');
+                    if (durationDisplay) {
+                        const duration = data.video_duration || 0;
+                        const minutes = Math.floor(duration / 60);
+                        const seconds = Math.floor(duration % 60);
+                        durationDisplay.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Error displaying video info:', error);
+            this.hideVideoInfoDisplay();
+        }
+    }
+
+    hideVideoInfoDisplay() {
+        const infoDisplay = document.getElementById('video-info-display');
+        if (infoDisplay) {
+            infoDisplay.style.display = 'none';
+        }
+    }
+
+    async loadChunkDataForAnalysis(videoFile) {
+        try {
+            const response = await fetch(`/api/video-caption/${videoFile}`);
+            const result = await response.json();
+            const data = result.data || result; // Handle nested data structure
+            
+            const chunkDataTextarea = document.getElementById('chunk-data');
+            if (chunkDataTextarea && data.chunks) {
+                // Format chunks for display
+                const formattedChunks = data.chunks.map(chunk => ({
+                    chunk_id: chunk.chunk_id || 1,
+                    start_time: chunk.start_time || 0,
+                    end_time: chunk.end_time || 0,
+                    caption: chunk.caption || ''
+                }));
+                chunkDataTextarea.value = JSON.stringify(formattedChunks, null, 2);
+            }
+        } catch (error) {
+            console.error('Error loading chunk data:', error);
+        }
+    }
+
+    async findRelevantChunk(videoFile, query) {
+        const loadingDiv = document.getElementById('chunk-analysis-loading');
+        const resultsDiv = document.getElementById('chunk-analysis-results');
+        const placeholderDiv = document.getElementById('chunk-analysis-placeholder');
+        
+        // Show loading state with timing
+        const analysisTimer = this.startTiming();
+        if (loadingDiv) loadingDiv.style.display = 'block';
+        if (resultsDiv) resultsDiv.style.display = 'none';
+        if (placeholderDiv) placeholderDiv.style.display = 'none';
+        
+        // Show start notification
+        showNotification('🔍 Starting chunk analysis...', 'info', 3000);
+        
+        try {
+            const response = await fetch('/api/find-relevant-chunk', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    video_file: videoFile,
+                    query: query
+                })
+            });
+            
+            const result = await response.json();
+            const processingTime = analysisTimer.end();
+            
+            if (result.chunk_info) {
+                // Hide loading and show results
+                if (loadingDiv) loadingDiv.style.display = 'none';
+                if (resultsDiv) resultsDiv.style.display = 'block';
+                
+                // Calculate and display duration properly
+                const startTime = result.chunk_info.start_time || 0;
+                const endTime = result.chunk_info.end_time || 0;
+                const duration = endTime - startTime;
+                
+                // Update result displays with proper formatting
+                const elements = {
+                    'result-chunk-number': result.chunk_info.chunk_id || '-',
+                    'result-start-time': this.formatTime(startTime),
+                    'result-end-time': this.formatTime(endTime),
+                    'result-duration': duration.toFixed(1),
+                    'result-caption': result.chunk_info.caption || '-',
+                    'analysis-time': formatDuration(processingTime)
+                };
+                
+                Object.entries(elements).forEach(([id, value]) => {
+                    const element = document.getElementById(id);
+                    if (element) element.textContent = value;
+                });
+                
+                // Show completion notification with timing
+                showNotification(
+                    `✅ Analysis completed in ${formatDuration(processingTime)}`, 
+                    'success', 
+                    4000
+                );
+            } else {
+                throw new Error('No chunk found');
+            }
+        } catch (error) {
+            console.error('Error finding relevant chunk:', error);
+            const processingTime = analysisTimer.end();
+            if (loadingDiv) loadingDiv.style.display = 'none';
+            if (placeholderDiv) {
+                placeholderDiv.style.display = 'block';
+                placeholderDiv.innerHTML = `
+                    <i class="fas fa-exclamation-triangle" style="font-size: 3rem; opacity: 0.3; color: var(--danger-color);"></i>
+                    <p style="margin-top: 1rem;">Error analyzing chunks</p>
+                    <p style="font-size: 0.875rem;">Failed after ${formatDuration(processingTime)}</p>
+                `;
+            }
+            
+            showNotification(
+                `❌ Analysis failed after ${formatDuration(processingTime)}`, 
+                'error', 
+                6000
+            );
+        }
+    }
+
+    formatTime(seconds) {
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    formatDuration(milliseconds) {
+        if (milliseconds < 1000) return `${milliseconds}ms`;
+        const seconds = milliseconds / 1000;
+        if (seconds < 60) return `${seconds.toFixed(1)}s`;
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    startTiming() {
+        return {
+            startTime: performance.now(),
+            getElapsed: () => performance.now() - this.startTime,
+            end: () => performance.now() - this.startTime
+        };
+    }
+
+    showNotification(message, type = 'info', duration = 5000) {
         const notification = document.createElement('div');
         notification.className = `notification notification-${type}`;
-        notification.textContent = message;
+        
+        const icons = {
+            success: 'check-circle',
+            error: 'exclamation-triangle', 
+            warning: 'exclamation-circle',
+            info: 'info-circle',
+            timing: 'clock'
+        };
+        
+        notification.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <i class="fas fa-${icons[type] || icons.info}"></i>
+                <div>
+                    <div style="font-weight: 500;">${message}</div>
+                    <div style="font-size: 0.75rem; opacity: 0.7; margin-top: 0.25rem;">
+                        ${new Date().toLocaleTimeString()}
+                    </div>
+                </div>
+                <button onclick="this.closest('.notification').remove()" style="
+                    margin-left: auto;
+                    background: none;
+                    border: none;
+                    color: inherit;
+                    cursor: pointer;
+                    opacity: 0.7;
+                    font-size: 1.2rem;
+                    line-height: 1;
+                ">×</button>
+            </div>
+        `;
+        
+        // Enhanced positioning with backdrop
+        notification.style.cssText = `
+            position: fixed;
+            top: 2rem;
+            right: 2rem;
+            z-index: 10000;
+            min-width: 320px;
+            max-width: 500px;
+            animation: slideIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            backdrop-filter: blur(10px);
+            background: rgba(255, 255, 255, 0.95);
+        `;
         
         document.body.appendChild(notification);
         
-        // Auto-remove after 5 seconds
-        setTimeout(() => {
-            notification.remove();
-        }, 5000);
+        // Auto-dismiss with enhanced animations
+        const dismissTimer = setTimeout(() => {
+            this.dismissNotification(notification);
+        }, duration);
+        
+        // Click to dismiss
+        notification.addEventListener('click', (e) => {
+            if (!e.target.closest('button')) {
+                clearTimeout(dismissTimer);
+                this.dismissNotification(notification);
+            }
+        });
+        
+        return notification;
+    }
+
+    dismissNotification(notification) {
+        if (notification && notification.parentNode) {
+            notification.style.animation = 'slideOut 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards';
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.remove();
+                }
+            }, 300);
+        }
     }
 
     showSpinner(element) {
@@ -126,371 +459,6 @@ class SurveillanceApp {
     }
 }
 
-// Chat Interface Handler
-class ChatInterface {
-    constructor() {
-        this.isProcessing = false;
-        this.currentVideo = null;
-    }
-
-    init() {
-        this.setupEventListeners();
-        this.loadAvailableVideos();
-        this.checkSystemStatus();
-    }
-
-    setupEventListeners() {
-        const processBtn = document.querySelector('#process-video-btn');
-        const chatForm = document.querySelector('#chat-form');
-        const clearBtn = document.querySelector('#clear-chat-btn');
-
-        if (processBtn) {
-            processBtn.addEventListener('click', () => this.processVideo());
-        }
-
-        if (chatForm) {
-            chatForm.addEventListener('submit', (e) => {
-                e.preventDefault();
-                this.sendMessage();
-            });
-        }
-
-        if (clearBtn) {
-            clearBtn.addEventListener('click', () => this.clearChat());
-        }
-    }
-
-    async loadAvailableVideos() {
-        try {
-            const response = await fetch('/available-videos');
-            
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-            
-            const data = await response.json();
-            
-            const videoSelect = document.querySelector('#video-select');
-            if (!videoSelect) {
-                console.warn('Video select element not found');
-                return;
-            }
-
-            if (data.error) {
-                videoSelect.innerHTML = '<option value="">Error loading videos</option>';
-                console.error('Server error:', data.error);
-                return;
-            }
-            
-            if (data.videos && Array.isArray(data.videos)) {
-                videoSelect.innerHTML = '<option value="">Select a video...</option>';
-                
-                data.videos.forEach(video => {
-                    if (video.filename) {
-                        const option = document.createElement('option');
-                        option.value = video.filename;
-                        option.textContent = `${video.filename} (${video.size_mb || '?'}MB, ${video.duration || 'Unknown'})`;
-                        videoSelect.appendChild(option);
-                    }
-                });
-                
-                console.log(`Loaded ${data.videos.length} videos successfully`);
-            } else {
-                videoSelect.innerHTML = '<option value="">No videos found</option>';
-                console.warn('No videos data received');
-            }
-        } catch (error) {
-            console.error('Failed to load videos:', error);
-            const videoSelect = document.querySelector('#video-select');
-            if (videoSelect) {
-                videoSelect.innerHTML = '<option value="">Failed to load videos</option>';
-            }
-            
-            // Show user notification
-            if (window.showNotification) {
-                window.showNotification('Failed to load video list', 'error');
-            }
-        }
-    }
-
-    async checkSystemStatus() {
-        try {
-            const response = await fetch('/status');
-            const data = await response.json();
-            
-            const statusEl = document.querySelector('#system-status');
-            if (statusEl) {
-                statusEl.textContent = data.status || 'unknown';
-                statusEl.className = `status-indicator ${data.status === 'online' ? 'status-success' : 'status-error'}`;
-            }
-        } catch (error) {
-            console.error('Failed to check status:', error);
-        }
-    }
-
-    async processVideo() {
-        if (this.isProcessing) return;
-
-        const videoSelect = document.querySelector('#video-select');
-        const numFrames = document.querySelector('#num-frames');
-        const fpsInput = document.querySelector('#fps-sampling');
-        const timeBound = document.querySelector('#time-bound');
-
-        if (!videoSelect.value) {
-            window.showNotification('Please select a video first', 'warning');
-            return;
-        }
-
-        this.isProcessing = true;
-        const processBtn = document.querySelector('#process-video-btn');
-        const originalText = processBtn.textContent;
-        const statusEl = document.querySelector('#processing-status');
-        
-        processBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
-        processBtn.disabled = true;
-        
-        // Show processing status
-        statusEl.classList.remove('hidden');
-        statusEl.innerHTML = '<div class="status-indicator status-info"><i class="fas fa-spinner fa-spin"></i> Processing video frames...</div>';
-
-        try {
-            const requestData = {
-                video_file: videoSelect.value,
-                num_frames: parseInt(numFrames.value) || 64,
-                fps_sampling: parseFloat(fpsInput.value) || null
-            };
-
-            // Add time bound if specified
-            if (timeBound.value) {
-                requestData.time_bound = parseFloat(timeBound.value);
-            }
-
-            const response = await fetch('/process-video', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(requestData)
-            });
-
-            const data = await response.json();
-            
-            if (data.success) {
-                this.currentVideo = videoSelect.value;
-                this.showProcessingResults(data);
-                this.enableChat();
-                this.updateVideoPlayer(videoSelect.value);
-                
-                
-                // Trigger custom event for other components
-                window.dispatchEvent(new CustomEvent('videoProcessed', { detail: data }));
-            } else {
-                window.showNotification(data.error || 'Processing failed', 'error');
-                statusEl.innerHTML = '<div class="status-indicator status-error">Processing failed</div>';
-            }
-        } catch (error) {
-            window.showNotification('Error processing video: ' + error.message, 'error');
-            statusEl.innerHTML = '<div class="status-indicator status-error">Processing error</div>';
-        } finally {
-            this.isProcessing = false;
-            processBtn.innerHTML = originalText;
-            processBtn.disabled = false;
-        }
-    }
-
-    showProcessingResults(data) {
-        const resultsEl = document.querySelector('#processing-results');
-        const statusEl = document.querySelector('#processing-status');
-        
-        // Show compact notification at top-right instead of inline results
-        if (window.showNotification) {
-            window.showNotification(
-                `✅ <strong>Video Ready!</strong><br>📊 ${data.frames_processed} frames • ${data.processing_time}`,
-                'success',
-                6000
-            );
-        }
-        
-        // Hide both results and status elements to keep UI clean
-        if (resultsEl) {
-            resultsEl.classList.add('hidden');
-        }
-        if (statusEl) {
-            statusEl.classList.add('hidden');
-        }
-    }
-
-    enableChat() {
-        const messageInput = document.querySelector('#message-input');
-        const submitBtn = document.querySelector('#chat-form button[type="submit"]');
-        
-        if (messageInput && submitBtn) {
-            messageInput.disabled = false;
-            submitBtn.disabled = false;
-            messageInput.placeholder = "Ask about the video... (e.g., 'What happens at 30 seconds?')";
-            
-            // Add visual indication that chat is enabled
-            messageInput.style.borderColor = 'var(--accent-color)';
-            setTimeout(() => {
-                messageInput.style.borderColor = '';
-            }, 2000);
-        }
-    }
-
-    updateVideoPlayer(videoFile) {
-        const videoPlayer = document.querySelector('#video-player');
-        if (videoPlayer && videoFile) {
-            // Update video source to show the selected video
-            const videoUrl = `/video-stream/${videoFile}`;
-            videoPlayer.src = videoUrl;
-            
-            // Find the source element and update it too
-            const sourceEl = videoPlayer.querySelector('source');
-            if (sourceEl) {
-                sourceEl.src = videoUrl;
-            }
-            
-            // Reload the video
-            videoPlayer.load();
-            
-            console.log(`Updated video player to show: ${videoFile}`);
-        }
-    }
-
-    async sendMessage() {
-        const messageInput = document.querySelector('#message-input');
-        const message = messageInput.value.trim();
-        
-        if (!message) return;
-
-        if (!this.currentVideo) {
-            window.showNotification('Please process a video first', 'warning');
-            return;
-        }
-
-        this.addMessageToChat('user', message);
-        messageInput.value = '';
-
-        const responseEl = this.addMessageToChat('assistant', '');
-        this.showTypingIndicator(responseEl);
-        
-        let currentResponse = '';
-
-        try {
-            // Use simplified non-streaming approach for better performance
-            const response = await fetch('/chat', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    message: message,
-                    enable_temporal: document.querySelector('#enable-temporal')?.checked || false,
-                    generate_snippets: document.querySelector('#generate-snippets')?.checked || false
-                })
-            });
-
-            const data = await response.json();
-            
-            this.hideTypingIndicator(responseEl);
-            
-            if (data.success) {
-                responseEl.innerHTML = this.formatResponse(data.response);
-                
-                // Show processing info in a compact way
-                if (data.inference_time || data.frames_processed) {
-                    const infoEl = document.createElement('div');
-                    infoEl.className = 'mt-2';
-                    infoEl.style.fontSize = '0.75rem';
-                    infoEl.style.color = 'var(--text-secondary)';
-                    infoEl.innerHTML = `⚡ ${data.inference_time?.toFixed(1)}s • ${data.frames_processed} frames`;
-                    responseEl.appendChild(infoEl);
-                }
-                
-                if (data.video_snippets && data.video_snippets.length > 0) {
-                    this.addVideoSnippets(data.video_snippets);
-                }
-            } else {
-                responseEl.innerHTML = `<div class="status-indicator status-error">Error: ${data.error}</div>`;
-            }
-        } catch (error) {
-            this.hideTypingIndicator(responseEl);
-            responseEl.innerHTML = `<div class="status-indicator status-error">Error: ${error.message}</div>`;
-        }
-    }
-
-    addMessageToChat(type, content) {
-        const chatMessages = document.querySelector('#chat-messages');
-        if (!chatMessages) return null;
-
-        const messageEl = document.createElement('div');
-        messageEl.className = `chat-message ${type}`;
-        messageEl.innerHTML = content;
-
-        chatMessages.appendChild(messageEl);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-
-        return messageEl;
-    }
-
-    showTypingIndicator(element) {
-        element.innerHTML = '<div class="typing-indicator"><i class="fas fa-spinner fa-spin"></i> Analyzing video...</div>';
-    }
-
-    hideTypingIndicator(element) {
-        // This will be replaced with actual content
-    }
-
-    updateLoadingMessage(element, message) {
-        element.innerHTML = `<div class="typing-indicator"><i class="fas fa-spinner fa-spin"></i> ${message}</div>`;
-    }
-
-    formatResponse(response) {
-        // Convert markdown-like formatting to HTML
-        return response
-            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-            .replace(/\*(.*?)\*/g, '<em>$1</em>')
-            .replace(/\n/g, '<br>');
-    }
-
-    addVideoSnippets(snippets) {
-        const chatMessages = document.querySelector('#chat-messages');
-        if (!chatMessages || !snippets.length) return;
-
-        const snippetsEl = document.createElement('div');
-        snippetsEl.className = 'video-snippets mt-3';
-        snippetsEl.innerHTML = `
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-title">Related Video Segments</div>
-                </div>
-                <div class="card-body">
-                    ${snippets.map(snippet => `
-                        <div class="snippet-item mb-2">
-                            <strong>${snippet.timestamp}s:</strong> ${snippet.description}
-                            <button class="btn btn-outline btn-sm ml-2" onclick="playSnippet(${snippet.timestamp})">
-                                Play
-                            </button>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-        `;
-
-        chatMessages.appendChild(snippetsEl);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
-
-    clearChat() {
-        const chatMessages = document.querySelector('#chat-messages');
-        if (chatMessages) {
-            chatMessages.innerHTML = '';
-        }
-
-        fetch('/chat/clear', { method: 'POST' })
-            .catch(error => console.error('Failed to clear chat:', error));
-    }
-}
 
 // Caption Generator Handler
 class CaptionGenerator {
@@ -640,13 +608,21 @@ class CaptionGenerator {
                 const lines = chunk.split('\n');
                 
                 for (const line of lines) {
-                    if (line.startsWith('data: ')) {
+                    const trimmedLine = line.trim();
+                    if (trimmedLine.startsWith('data: ')) {
                         try {
-                            const data = JSON.parse(line.slice(6));
-                            this.handleRealTimeUpdate(data);
+                            const jsonData = trimmedLine.slice(6); // Remove 'data: ' prefix
+                            if (jsonData) { // Only parse if there's actual data
+                                const data = JSON.parse(jsonData);
+                                this.handleRealTimeUpdate(data);
+                            }
                         } catch (e) {
-                            console.warn('Failed to parse SSE data:', line);
+                            console.warn('Failed to parse SSE data:', trimmedLine, 'Error:', e.message);
                         }
+                    }
+                    // Skip empty lines and event lines
+                    if (trimmedLine === '' || trimmedLine.startsWith('event:')) {
+                        continue;
                     }
                 }
             }
@@ -694,7 +670,7 @@ class CaptionGenerator {
     handleRealTimeUpdate(data) {
         const progressText = document.querySelector('#progress-text');
         const progressFill = document.querySelector('#progress-fill');
-        const liveChunks = document.querySelector('#live-chunks');
+        const captionResults = document.querySelector('#caption-results');
         
         switch (data.type) {
             case 'status':
@@ -702,10 +678,13 @@ class CaptionGenerator {
                 break;
                 
             case 'processing_info':
+                this.captionStartTime = performance.now();
                 progressText.textContent = `Processing ${data.total_chunks} chunks with ${data.total_frames} total frames`;
+                showNotification(`🚀 Started processing ${data.total_chunks} chunks`, 'info', 3000);
                 break;
                 
             case 'chunk_start':
+                this.currentChunkStart = performance.now();
                 progressText.textContent = `Processing chunk ${data.chunk}/${data.total_chunks} (${data.start_time.toFixed(1)}s - ${data.end_time.toFixed(1)}s)`;
                 break;
                 
@@ -713,20 +692,41 @@ class CaptionGenerator {
                 // Update progress
                 const progress = data.progress || 0;
                 progressFill.style.width = `${progress}%`;
-                progressText.textContent = `Completed chunk ${data.chunk}/${data.total_chunks} (${progress.toFixed(1)}%)`;
                 
-                // Add chunk result to live display
+                // Calculate chunk timing
+                const chunkTime = this.currentChunkStart ? performance.now() - this.currentChunkStart : 0;
+                const totalTime = this.captionStartTime ? performance.now() - this.captionStartTime : 0;
+                
+                progressText.textContent = `Completed chunk ${data.chunk}/${data.total_chunks} (${progress.toFixed(1)}%) - ${formatDuration(totalTime)} total`;
+                
+                // Make caption results visible
+                captionResults.classList.remove('hidden');
+                
+                // Add chunk result to display with enhanced timing
                 const chunkDiv = document.createElement('div');
                 chunkDiv.className = 'chunk-result';
+                
+                // Ensure caption is displayed even if empty
+                let captionText = data.caption || 'No caption text available';
+                if (typeof captionText !== 'string') {
+                    captionText = JSON.stringify(captionText);
+                }
+                
                 chunkDiv.innerHTML = `
                     <div class="chunk-header">
                         <strong>📹 Chunk ${data.chunk}/${data.total_chunks}</strong>
-                        <span class="chunk-timing">${data.processing_time.toFixed(1)}s • ${data.characters} chars</span>
+                        <span class="chunk-timing">
+                            ⏱️ ${formatDuration(chunkTime)} • ${data.characters || 0} chars
+                            ${data.processing_time ? `• Server: ${formatDuration(data.processing_time * 1000)}` : ''}
+                        </span>
                     </div>
-                    <div class="chunk-content">${data.caption}</div>
+                    <div class="chunk-content">${captionText}</div>
                 `;
-                liveChunks.appendChild(chunkDiv);
-                liveChunks.scrollTop = liveChunks.scrollHeight; // Auto-scroll
+                captionResults.appendChild(chunkDiv);
+                captionResults.scrollTop = captionResults.scrollHeight; // Auto-scroll
+                
+                // Log for debugging
+                console.log('Chunk completed:', data);
                 break;
                 
             case 'cleanup':
@@ -736,31 +736,50 @@ class CaptionGenerator {
                 cleanupMsg.textContent = `🧹 ${data.message}`;
                 cleanupMsg.style.opacity = '0.7';
                 cleanupMsg.style.fontSize = '0.8rem';
-                liveChunks.appendChild(cleanupMsg);
+                captionResults.appendChild(cleanupMsg);
                 setTimeout(() => cleanupMsg.remove(), 3000);
                 break;
                 
             case 'complete':
-                // Show final combined caption
+                // Calculate total processing time
+                const finalTotalTime = this.captionStartTime ? performance.now() - this.captionStartTime : 0;
+                
+                // Show final combined caption with timing
                 const finalDiv = document.querySelector('#final-caption');
                 finalDiv.innerHTML = `
                     <div class="final-caption-header">
                         <h3>✅ Final Caption</h3>
                         <div class="caption-stats">
-                            ${data.caption.length} characters • ${data.chunks_processed} chunks • ${data.total_frames} frames processed
+                            ${data.caption.length} characters • ${data.chunks_processed} chunks • ${data.total_frames} frames
+                            <br>
+                            <span class="timing-badge">⏱️ Total: ${formatDuration(finalTotalTime)}</span>
                         </div>
                     </div>
                     <div class="final-caption-content">${data.caption}</div>
                 `;
                 finalDiv.classList.remove('hidden');
-                progressText.textContent = `✅ Completed! ${data.chunks_processed} chunks processed successfully`;
+                progressText.textContent = `✅ Completed! ${data.chunks_processed} chunks in ${formatDuration(finalTotalTime)}`;
                 progressFill.style.width = '100%';
+                
+                // Show completion notification
+                showNotification(
+                    `✅ Caption generation completed in ${formatDuration(finalTotalTime)}`, 
+                    'success', 
+                    6000
+                );
                 break;
                 
             case 'error':
             case 'chunk_error':
                 console.error('Processing error:', data);
-                progressText.innerHTML = `<span style="color: red;">Error: ${data.message || data.error}</span>`;
+                const errorTime = this.captionStartTime ? performance.now() - this.captionStartTime : 0;
+                progressText.innerHTML = `<span style="color: red;">Error after ${formatDuration(errorTime)}: ${data.message || data.error}</span>`;
+                
+                showNotification(
+                    `❌ Processing error after ${formatDuration(errorTime)}`, 
+                    'error', 
+                    8000
+                );
                 break;
         }
     }
@@ -840,7 +859,11 @@ class CaptionGenerator {
             return;
         }
 
-        estimationEl.innerHTML = '<div class="spinner"></div> Calculating...';
+        const estimationTimer = {
+            startTime: performance.now(),
+            end: () => performance.now() - this.startTime
+        };
+        estimationEl.innerHTML = '<div class="spinner"></div> Calculating estimate...';
 
         try {
             const response = await fetch('/caption-estimate', {
@@ -857,6 +880,7 @@ class CaptionGenerator {
             });
 
             const data = await response.json();
+            const calcTime = estimationTimer.end();
             
             if (data.success) {
                 const chunks = data.processing_info.chunks_count;
@@ -878,23 +902,42 @@ class CaptionGenerator {
                 }
 
                 estimationEl.innerHTML = `
-                    <div><strong>📹 Video:</strong> ${duration}s (${Math.round(data.video_info.fps)} FPS)</div>
-                    <div><strong>📊 Processing:</strong> ${chunks} chunks${modeDescription}</div>
-                    <div><strong>🎯 Frames:</strong> ${totalFrames} total (~${Math.round(totalFrames/chunks)}/chunk)</div>
-                    <div><strong>⏱️ Time:</strong> ~${data.time_estimation.total_time_minutes} minutes</div>
-                    <div style="font-size: 0.7rem; opacity: 0.8; margin-top: 0.5rem;">
-                        Processing: ${data.time_estimation.processing_time_seconds}s + Model loading: 16s
+                    <div class="estimation-header">
+                        <strong>⏱️ Processing Estimate</strong>
+                        <span class="calc-time">Calculated in ${formatDuration(calcTime)}</span>
+                    </div>
+                    <div class="estimation-grid">
+                        <div class="estimation-item">
+                            <span class="estimation-label">📹 Video Duration</span>
+                            <span class="estimation-value">${duration}s (${Math.round(data.video_info.fps)} FPS)</span>
+                        </div>
+                        <div class="estimation-item">
+                            <span class="estimation-label">📊 Processing Mode</span>
+                            <span class="estimation-value">${chunks} chunks${modeDescription}</span>
+                        </div>
+                        <div class="estimation-item">
+                            <span class="estimation-label">🎯 Total Frames</span>
+                            <span class="estimation-value">${totalFrames} (~${Math.round(totalFrames/chunks)}/chunk)</span>
+                        </div>
+                        <div class="estimation-item">
+                            <span class="estimation-label">⏱️ Estimated Time</span>
+                            <span class="estimation-value">~${data.time_estimation.total_time_minutes} minutes</span>
+                        </div>
+                    </div>
+                    <div class="estimation-details">
+                        <div>Processing: ${data.time_estimation.processing_time_seconds}s + Model loading: 16s</div>
+                        <div>Average: ${formatDuration((data.time_estimation.processing_time_seconds * 1000) / chunks)} per chunk</div>
                     </div>
                 `;
 
                 // Show chunk preview if available
                 if (data.chunk_details && data.chunk_details.length > 0) {
                     const previewHtml = data.chunk_details.slice(0, 3).map(chunk => 
-                        `Chunk ${chunk.chunk_number}: ${chunk.start_time}s-${chunk.end_time}s (${chunk.frames} frames)`
+                        `Chunk ${chunk.chunk_number}: ${chunk.start_time.toFixed(1)}s-${chunk.end_time.toFixed(1)}s (${chunk.frames} frames)`
                     ).join('<br>');
                     
                     estimationEl.innerHTML += `
-                        <div style="font-size: 0.7rem; margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #e5e7eb;">
+                        <div class="estimation-preview">
                             <strong>Preview:</strong><br>
                             ${previewHtml}
                             ${data.chunk_details.length > 3 ? '<br>...' : ''}
@@ -902,10 +945,10 @@ class CaptionGenerator {
                     `;
                 }
             } else {
-                estimationEl.innerHTML = `<div style="color: var(--danger-color);">Error: ${data.error}</div>`;
+                estimationEl.innerHTML = `<div class="estimation-error">Error: ${data.error}</div>`;
             }
         } catch (error) {
-            estimationEl.innerHTML = `<div style="color: var(--danger-color);">Failed to calculate estimate</div>`;
+            estimationEl.innerHTML = `<div class="estimation-error">Failed to calculate estimate</div>`;
             console.error('Estimation error:', error);
         }
     }
@@ -923,17 +966,10 @@ class CaptionGenerator {
     }
 }
 
-// Global functions
-function playSnippet(timestamp) {
-    // This would integrate with video player to seek to specific timestamp
-    console.log('Playing snippet at:', timestamp);
-}
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', () => {
     window.SurveillanceApp = new SurveillanceApp();
-    window.ChatInterface = new ChatInterface();
-    window.ChatInterface.init();
     window.CaptionGenerator = new CaptionGenerator();
     window.CaptionGenerator.init();
 });

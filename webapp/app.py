@@ -4,17 +4,19 @@ InternVideo2.5 Enhanced Web Interface
 Web app for video analysis with streaming responses and chat functionality
 """
 
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response, stream_template
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response, stream_template, send_file
 import subprocess
 import json
 import os
 import sys
+import re
 import time
 from datetime import datetime
 import logging
 import threading
-from pathlib import Path
 import torch
+from typing import List
+from pathlib import Path
 
 # Add parent directory to path to access main_enhanced.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,6 +32,7 @@ import yaml
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'internvideo-surveillance-app'
+app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "inputs/videos")
 
 # Configure logging
 logging.basicConfig(
@@ -224,316 +227,8 @@ def get_available_videos():
         logger.error(f"Error getting available videos: {str(e)}")
         return jsonify({'error': f'Failed to get video list: {str(e)}'}), 500
 
-@app.route('/process-video', methods=['POST'])
-def process_video():
-    """Process video without any initial prompt - just extract and cache frames"""
-    request_id = str(int(time.time()))[-6:]  # Last 6 digits for tracking
-    
-    try:
-        logger.info(f"[{request_id}] === VIDEO PROCESSING REQUEST START ===")
-        
-        manager = get_enhanced_manager()
-        if not manager:
-            logger.error(f"[{request_id}] FAILED: Model manager not initialized")
-            return jsonify({'error': 'Model manager not initialized'}), 500
-            
-        data = request.get_json()
-        logger.info(f"[{request_id}] Request data: {json.dumps(data, indent=2)}")
-        
-        # Extract parameters (no prompt needed)
-        video_file = data.get('video_file', 'bigbuckbunny.mp4')
-        num_frames = int(data.get('num_frames', 64))
-        fps_sampling = float(data.get('fps_sampling', 0)) if data.get('fps_sampling') else None
-        time_bound = float(data.get('time_bound', 0)) if data.get('time_bound') else None
-        
-        logger.info(f"[{request_id}] Processing parameters:")
-        logger.info(f"[{request_id}]   - Video File: {video_file}")
-        logger.info(f"[{request_id}]   - Frames: {num_frames}")
-        logger.info(f"[{request_id}]   - FPS Sampling: {fps_sampling}")
-        logger.info(f"[{request_id}]   - Time Bound: {time_bound}")
-        
-        # Get available video files from directory
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        videos_dir = os.path.join(base_dir, "inputs/videos")
-        available_videos = [f for f in os.listdir(videos_dir) if f.endswith(('.mp4', '.avi', '.mov', '.mkv'))]
-        
-        # Validate video file
-        if video_file not in available_videos:
-            logger.error(f"[{request_id}] VALIDATION ERROR: Video file {video_file} not found in directory")
-            return jsonify({'error': f'Video file must be one of: {", ".join(available_videos)}'}), 400
-        
-        # Validate parameters
-        if num_frames < 1 or num_frames > 160:
-            logger.error(f"[{request_id}] VALIDATION ERROR: Frame count {num_frames} not in range 1-160")
-            return jsonify({'error': 'Frame count must be between 1 and 160'}), 400
-        
-        if fps_sampling and (fps_sampling < 0.1 or fps_sampling > 5.0):
-            logger.error(f"[{request_id}] VALIDATION ERROR: FPS sampling {fps_sampling} not in range 0.1-5.0")
-            return jsonify({'error': 'FPS sampling must be between 0.1 and 5.0'}), 400
-            
-        if time_bound and (time_bound < 1 or time_bound > 600):
-            logger.error(f"[{request_id}] VALIDATION ERROR: Time bound {time_bound} not in range 1-600")
-            return jsonify({'error': 'Time bound must be between 1 and 600 seconds'}), 400
-        
-        # Get video path
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        video_path = os.path.join(base_dir, f"inputs/videos/{video_file}")
-        
-        logger.info(f"[{request_id}] Video path: {video_path}")
-        logger.info(f"[{request_id}] Video exists: {os.path.exists(video_path)}")
-        
-        if not os.path.exists(video_path):
-            logger.error(f"[{request_id}] FAILED: Video file not found at {video_path}")
-            return jsonify({'error': f'Video file not found: {DEFAULT_VIDEO}'}), 404
-        
-        logger.info(f"[{request_id}] Starting video preprocessing...")
-        
-        # Use enhanced manager for video processing only
-        start_time = time.time()
-        
-        # Collect processing response with detailed logging
-        result = {}
-        chunk_count = 0
-        
-        for chunk in manager.preprocess_video(
-            video_path, num_frames, fps_sampling, time_bound
-        ):
-            chunk_count += 1
-            logger.info(f"[{request_id}] Chunk {chunk_count}: {chunk.get('type', 'unknown')} - {chunk.get('message', 'no message')}")
-            
-            if chunk['type'] == 'video_processed':
-                result = {
-                    'success': True,
-                    'frames_processed': chunk['frames_processed'],
-                    'video_info': chunk['video_info'],
-                    'message': chunk['message'],
-                    'preprocessing_time': chunk['preprocessing_time']
-                }
-                logger.info(f"[{request_id}] SUCCESS: Video processed successfully")
-                logger.info(f"[{request_id}] Frames processed: {chunk['frames_processed']}")
-                logger.info(f"[{request_id}] Preprocessing time: {chunk['preprocessing_time']:.2f}s")
-                logger.info(f"[{request_id}] Video info: {json.dumps(chunk.get('video_info', {}), indent=2)}")
-                break
-            elif chunk['type'] == 'error':
-                logger.error(f"[{request_id}] PROCESSING ERROR: {chunk['message']}")
-                return jsonify({
-                    'error': chunk['message']
-                }), 500
-            elif chunk['type'] == 'status':
-                logger.info(f"[{request_id}] STATUS: {chunk['message']}")
-        
-        processing_time = time.time() - start_time
-        
-        logger.info(f"[{request_id}] Total processing time: {processing_time:.2f}s")
-        logger.info(f"[{request_id}] Total chunks received: {chunk_count}")
-        
-        # Check if we got a result
-        if not result:
-            logger.error(f"[{request_id}] FAILED: No processing result received after {chunk_count} chunks")
-            return jsonify({'error': 'Video processing failed - no result received'}), 500
-        
-        result['processing_time'] = f"{processing_time:.2f}s"
-        result['timestamp'] = datetime.now().isoformat()
-        result['request_id'] = request_id
-        
-        logger.info(f"[{request_id}] Final result: {json.dumps(result, indent=2, default=str)}")
-        logger.info(f"[{request_id}] === VIDEO PROCESSING REQUEST END ===")
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"[{request_id}] EXCEPTION: {str(e)}", exc_info=True)
-        return jsonify({'error': f'Video processing error: {str(e)}'}), 500
 
-@app.route('/chat', methods=['POST'])
-def chat_with_video():
-    """Handle chat messages with processed video and temporal analysis"""
-    request_id = str(int(time.time()))[-6:]  # Last 6 digits for tracking
-    
-    try:
-        logger.info(f"[{request_id}] === CHAT REQUEST START ===")
-        
-        manager = get_enhanced_manager()
-        if not manager:
-            logger.error(f"[{request_id}] FAILED: Model manager not initialized")
-            return jsonify({'error': 'Model manager not initialized'}), 500
-            
-        data = request.get_json()
-        logger.info(f"[{request_id}] Chat request data: {json.dumps(data, indent=2)}")
-        
-        prompt = data.get('message', '')
-        enable_temporal = data.get('enable_temporal', True)  # Enable temporal analysis by default
-        generate_snippets = data.get('generate_snippets', True) and enable_temporal  # Only generate snippets if temporal is enabled
-        
-        if not prompt.strip():
-            logger.error(f"[{request_id}] VALIDATION ERROR: Empty prompt")
-            return jsonify({'error': 'Message cannot be empty'}), 400
-        
-        logger.info(f"[{request_id}] Chat query: '{prompt[:100]}{'...' if len(prompt) > 100 else ''}'")
-        logger.info(f"[{request_id}] Full prompt length: {len(prompt)} characters")
-        logger.info(f"[{request_id}] Temporal analysis enabled: {enable_temporal}")
-        logger.info(f"[{request_id}] Video snippets enabled: {generate_snippets}")
-        
-        # Check if video is preprocessed
-        session_info = manager.get_session_info()
-        if session_info:
-            logger.info(f"[{request_id}] Video session active:")
-            logger.info(f"[{request_id}]   - Video: {session_info.get('video_path', 'N/A')}")
-            logger.info(f"[{request_id}]   - Frames: {session_info.get('num_frames', 'N/A')}")
-            logger.info(f"[{request_id}]   - Preprocessing time: {session_info.get('preprocessing_time', 'N/A')}")
-        else:
-            logger.error(f"[{request_id}] FAILED: No video session active")
-            return jsonify({'error': 'No video preprocessed. Please process a video first.'}), 400
-        
-        logger.info(f"[{request_id}] Starting chat inference...")
-        start_time = time.time()
-        
-        # Collect streaming response with detailed logging and temporal analysis
-        response_text = ""
-        metrics = {}
-        temporal_data = None
-        video_snippets = []
-        chunk_count = 0
-        
-        for chunk in manager.chat_query(prompt, enable_temporal_analysis=enable_temporal):
-            chunk_count += 1
-            chunk_type = chunk.get('type', 'unknown')
-            
-            if chunk_type == 'response_chunk':
-                # Log every 10th chunk to avoid spam
-                if chunk_count % 10 == 1:
-                    logger.info(f"[{request_id}] Response chunk {chunk_count}: '{chunk.get('content', '')}'")
-            elif chunk_type == 'response_complete':
-                response_text = chunk['full_content']
-                metrics = chunk.get('metadata', {})
-                temporal_data = chunk.get('temporal_data', {})
-                
-                logger.info(f"[{request_id}] SUCCESS: Chat response completed")
-                logger.info(f"[{request_id}] Response length: {len(response_text)} characters")
-                logger.info(f"[{request_id}] Response preview: '{response_text[:200]}{'...' if len(response_text) > 200 else ''}'")
-                logger.info(f"[{request_id}] Metadata: {json.dumps(metrics, indent=2, default=str)}")
-                
-                # Process temporal data if available
-                if temporal_data and temporal_data.get('has_temporal_references'):
-                    logger.info(f"[{request_id}] Found temporal references: {len(temporal_data.get('timestamps', []))} timestamps")
-                    
-                    # Generate video snippets if requested and temporal data exists
-                    if generate_snippets:
-                        logger.info(f"[{request_id}] Generating video snippets...")
-                        video_snippets = manager.generate_snippets_for_response(temporal_data, max_snippets=3)
-                        logger.info(f"[{request_id}] Generated {len(video_snippets)} video snippets")
-                
-                break
-            elif chunk_type == 'error':
-                logger.error(f"[{request_id}] CHAT ERROR: {chunk['message']}")
-                return jsonify({
-                    'error': chunk['message']
-                }), 500
-            elif chunk_type == 'status':
-                logger.info(f"[{request_id}] STATUS: {chunk['message']}")
-            elif chunk_type == 'user_message':
-                logger.info(f"[{request_id}] User message logged: '{chunk['content'][:100]}{'...' if len(chunk['content']) > 100 else ''}'")
-        
-        chat_time = time.time() - start_time
-        logger.info(f"[{request_id}] Total chat time: {chat_time:.2f}s")
-        logger.info(f"[{request_id}] Total chunks processed: {chunk_count}")
-        
-        # Check if we got a response
-        if not response_text:
-            logger.error(f"[{request_id}] FAILED: No response received after {chunk_count} chunks")
-            return jsonify({'error': 'Chat failed - no response received'}), 500
-        
-        # Get current chat history size
-        chat_history = manager.get_chat_history()
-        logger.info(f"[{request_id}] Chat history size: {len(chat_history)} messages")
-        
-        result = {
-            'success': True,
-            'response': response_text,
-            'metrics': {
-                'inference_time': f"{metrics.get('inference_time', 0):.2f}s",
-                'frames_processed': metrics.get('frames_processed', 0)
-            },
-            'temporal_data': temporal_data,
-            'video_snippets': video_snippets,
-            'timestamp': datetime.now().isoformat(),
-            'request_id': request_id,
-            'total_chat_time': f"{chat_time:.2f}s",
-            'chunks_processed': chunk_count,
-            'chat_history_size': len(chat_history)
-        }
-        
-        logger.info(f"[{request_id}] Final chat result: {json.dumps({k: v for k, v in result.items() if k != 'response'}, indent=2)}")
-        logger.info(f"[{request_id}] === CHAT REQUEST END ===")
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"[{request_id}] EXCEPTION: {str(e)}", exc_info=True)
-        return jsonify({'error': f'Chat error: {str(e)}'}), 500
 
-@app.route('/chat/stream', methods=['POST'])
-def stream_chat():
-    """Stream chat responses"""
-    def generate():
-        try:
-            manager = get_enhanced_manager()
-            if not manager:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Model manager not initialized'})}\\n\\n"
-                return
-                
-            data = request.get_json()
-            prompt = data.get('message', '')
-            
-            if not prompt.strip():
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Message cannot be empty'})}\\n\\n"
-                return
-            
-            logger.info(f"Streaming chat query: {prompt[:100]}...")
-            
-            # Stream response chunks
-            for chunk in manager.chat_query(prompt):
-                yield f"data: {json.dumps(chunk)}\\n\\n"
-                
-        except Exception as e:
-            logger.error(f"Streaming error: {str(e)}")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\\n\\n"
-    
-    return Response(generate(), mimetype='text/plain')
-
-@app.route('/chat/history')
-def get_chat_history():
-    """Get chat history"""
-    try:
-        manager = get_enhanced_manager()
-        if not manager:
-            return jsonify({'error': 'Model manager not initialized'}), 500
-            
-        history = manager.get_chat_history()
-        return jsonify({
-            'success': True,
-            'history': history,
-            'count': len(history)
-        })
-        
-    except Exception as e:
-        logger.error(f"History error: {str(e)}")
-        return jsonify({'error': f'History error: {str(e)}'}), 500
-
-@app.route('/chat/clear', methods=['POST'])
-def clear_chat_history():
-    """Clear chat history"""
-    try:
-        manager = get_enhanced_manager()
-        if not manager:
-            return jsonify({'error': 'Model manager not initialized'}), 500
-            
-        manager.clear_chat_history()
-        return jsonify({'success': True, 'message': 'Chat history cleared'})
-        
-    except Exception as e:
-        logger.error(f"Clear history error: {str(e)}")
-        return jsonify({'error': f'Clear history error: {str(e)}'}), 500
 
 @app.route('/video-stream')
 @app.route('/video-stream/<video_file>')
@@ -620,7 +315,9 @@ def generate_caption_stream():
                         'caption': final_result.get('caption', ''),
                         'chunk_details': [],  # Streaming doesn't provide chunk details
                         'video_duration': 0,  # Will be calculated from video info
-                        'frames_processed': final_result.get('total_frames', 0)
+                        'frames_processed': final_result.get('total_frames', 0),
+                        'fps_used': fps_sampling,
+                        'chunk_size': chunk_size
                     }
                     
                     if db.store_video_caption(video_file, storage_data):
@@ -694,40 +391,105 @@ def generate_caption():
         logger.info(f"[{request_id}] Starting caption generation...")
         start_time = time.time()
         
-        # Process video in chunks for caption generation with optimized performance
+        # Process video using temporal analysis approach for detailed frame-based captioning
         try:
-            caption_result = process_video_for_caption_optimized(
-                manager, video_path, video_file, fps_sampling, 
-                chunk_size, prompt, processing_mode, output_format, request_id
+            logger.info(f"[{request_id}] Starting temporal analysis-based caption generation...")
+            
+            # Get video duration to determine segment processing
+            video_info = manager.model_manager.get_video_info(video_path)
+            video_duration = video_info.get('duration', 0)
+            
+            # Create temporal analysis prompt for comprehensive video description
+            temporal_prompt = f"""COMPREHENSIVE VIDEO ANALYSIS TASK:
+
+You are analyzing {video_duration:.1f} seconds of video content with frame-by-frame analysis.
+
+Generate a detailed, comprehensive description of what happens throughout this entire video.
+
+REQUIRED OUTPUT FORMAT:
+Provide a complete video analysis with frame-by-frame details:
+
+1. OPENING SEQUENCE (Beginning): What happens at the start?
+2. EARLY DEVELOPMENT (First quarter): How does the story begin to unfold?
+3. MIDDLE SECTION (Halfway through): What key events occur?
+4. LATER DEVELOPMENTS (Third quarter): How does the story progress?
+5. CONCLUSION (Final part): How does the video end?
+
+For EACH section, provide:
+- Frame references (e.g., "Frame1:", "Frame25:", "Frame50-75:")
+- Detailed descriptions of actions, characters, settings
+- Key visual details and transitions
+- Emotional tone and narrative progression
+
+EXAMPLE FORMAT:
+Frame1: [Opening scene description]
+Frame15: [Early action description]
+Frame45: [Key moment description]
+Frame80: [Progression description]
+Frame120: [Conclusion description]
+
+Focus on providing a comprehensive, frame-by-frame analysis of the entire video narrative."""
+
+            # Process entire video with temporal analysis
+            caption_result = process_temporal_video_segment(
+                manager.model_manager,
+                video_path=video_path,
+                prompt=temporal_prompt,
+                num_frames=min(160, int(fps_sampling * video_duration)),  # Cap at 160 frames for memory
+                start_time=0,
+                end_time=video_duration,
+                fps_sampling=fps_sampling
             )
             
             processing_time = time.time() - start_time
             
-            if caption_result['success']:
+            if caption_result and caption_result.get('success') and caption_result.get('response'):
+                temporal_caption = caption_result['response']
+                
+                # Format the caption based on output format preference
+                if output_format == 'paragraph':
+                    formatted_caption = temporal_caption
+                elif output_format == 'timeline':
+                    # Create a timeline-based format
+                    formatted_caption = f"VIDEO TIMELINE ANALYSIS:\n\n{temporal_caption}"
+                else:
+                    formatted_caption = temporal_caption
+                
                 result = {
                     'success': True,
-                    'caption': caption_result['caption'],
+                    'caption': formatted_caption,
                     'video_file': video_file,
                     'fps_used': fps_sampling,
                     'chunk_size': chunk_size,
-                    'processing_mode': processing_mode,
+                    'processing_mode': 'temporal_analysis',
                     'output_format': output_format,
-                    'frames_processed': caption_result['total_frames'],
-                    'chunks_processed': caption_result['chunks_processed'],
+                    'frames_processed': caption_result.get('frames_processed', min(160, int(fps_sampling * video_duration))),
+                    'chunks_processed': 1,  # Single temporal analysis pass
                     'processing_time': f"{processing_time:.2f}s",
                     'timestamp': datetime.now().isoformat(),
                     'request_id': request_id,
-                    'chunk_details': caption_result.get('chunk_details', [])
+                    'chunk_details': [{
+                        'chunk_id': 1,
+                        'start_time': 0,
+                        'end_time': video_duration,
+                        'caption': formatted_caption,
+                        'frames_processed': caption_result.get('frames_processed', min(160, int(fps_sampling * video_duration))),
+                        'processing_time': f"{processing_time:.2f}s"
+                    }],
+                    'analysis_method': 'InternVideo2.5 Temporal Analysis'
                 }
                 
                 # Automatically store caption in database
                 try:
                     db = get_caption_db()
                     storage_data = {
-                        'caption': caption_result['caption'],
-                        'chunk_details': caption_result.get('chunk_details', []),
-                        'video_duration': caption_result.get('chunk_details', [{}])[-1].get('end_time', 0) if caption_result.get('chunk_details') else 0,
-                        'frames_processed': caption_result['total_frames']
+                        'caption': temporal_caption,
+                        'chunk_details': result['chunk_details'],
+                        'video_duration': video_duration,
+                        'frames_processed': result['frames_processed'],
+                        'fps_used': fps_sampling,
+                        'chunk_size': chunk_size,
+                        'analysis_method': 'temporal_analysis'
                     }
                     
                     if db.store_video_caption(video_file, storage_data):
@@ -738,14 +500,15 @@ def generate_caption():
                 except Exception as storage_error:
                     logger.error(f"[{request_id}] Error storing caption: {str(storage_error)}")
                 
-                logger.info(f"[{request_id}] Caption generation successful")
-                logger.info(f"[{request_id}] Caption length: {len(caption_result['caption'])} characters")
+                logger.info(f"[{request_id}] Temporal analysis caption generation successful")
+                logger.info(f"[{request_id}] Caption length: {len(temporal_caption)} characters")
                 logger.info(f"[{request_id}] Total processing time: {processing_time:.2f}s")
+                logger.info(f"[{request_id}] Analysis method: InternVideo2.5 Temporal Analysis")
                 logger.info(f"[{request_id}] === CAPTION GENERATION REQUEST END ===")
                 
                 return jsonify(result)
             else:
-                error_msg = caption_result['error']
+                error_msg = caption_result.get('error', 'Unknown temporal analysis error') if caption_result else 'Temporal analysis failed'
                 # Check if this is a validation error (not a server error)
                 if 'FPS sampling too low' in error_msg:
                     logger.warning(f"[{request_id}] Validation error: {error_msg}")
@@ -1017,24 +780,51 @@ def process_video_segment(model_manager, video_path, prompt, num_frames, start_t
         for pattern in tracking_patterns:
             cleaned_output = re.sub(pattern, '', cleaned_output, flags=re.IGNORECASE | re.DOTALL)
         
-        # Then remove other HTML tags (like <span>, </span>, etc.)
-        cleaned_output = re.sub(r'<[^>]+>', '', cleaned_output).strip()
+        # Remove common HTML tags and fragments that may remain after tracking removal
+        html_patterns = [
+            r'<[^>]+>',  # General HTML tags
+            r'^\w+>$',   # Standalone fragments like 'div>', 'span>' at start/end
+            r'^<\w+',    # Opening tags at start like '<div'
+            r'\w+>$',    # Closing fragments at end like 'div>'
+            r'<br\s*/?>', # HTML line breaks
+            r'&nbsp;',   # Non-breaking spaces
+            r'\s*br\s*/?>\s*',  # Standalone br fragments
+            r'\s*</?p>\s*',  # Paragraph tags
+        ]
+        for pattern in html_patterns:
+            cleaned_output = re.sub(pattern, ' ', cleaned_output, flags=re.IGNORECASE).strip()
+        
+        # Clean up multiple spaces
+        cleaned_output = re.sub(r'\s+', ' ', cleaned_output).strip()
         
         # Remove extra whitespace and newlines
         cleaned_output = re.sub(r'\s+', ' ', cleaned_output).strip()
         
-        # Check for invalid responses
+        # Check for invalid responses (enhanced validation)
         emoticon_patterns = ['>.<', '>_<', '-_-', 'T_T', '^_^', 'o_o', 'O_O', '._.',  '...', ':)', ':(', ':D']
         invalid_responses = ["i'm not sure", "i don't know", "i cannot see", "i cannot determine", "unable to", "sorry", "apologize"]
-        html_fragments = ["span>", "<span", "div>", "<div", "</", "/>"]
+        
+        # Check for HTML-like garbage that might get through
+        html_garbage_patterns = [
+            r'class\s*=\s*["\'][^"\']+["\']',  # HTML class attributes
+            r'data-\w+\s*=',  # HTML data attributes  
+            r'&amp;|&lt;|&gt;|&#\d+;|&nbsp;',  # HTML entities
+            r'api/scraper',  # API endpoints
+            r'segment=\d+',  # URL parameters
+            r'</?[a-zA-Z][^>]*>',  # Any remaining HTML tags
+            r'\bbr\s*/?>\s*',  # Line break fragments
+            r'^\s*<\s*$|>\s*$',  # Standalone angle brackets
+        ]
+        
+        contains_html_garbage = any(re.search(pattern, cleaned_output, re.IGNORECASE) for pattern in html_garbage_patterns)
         
         is_invalid = (
             not cleaned_output or  # Empty after cleaning
-            len(cleaned_output) < 10 or  # Too short (reduced from 15)
+            len(cleaned_output) < 10 or  # Need reasonable length
             cleaned_output in emoticon_patterns or  # Just an emoticon
-            any(invalid in cleaned_output.lower() for invalid in invalid_responses) or  # Uncertain responses (exact match)
-            any(html in cleaned_output.lower() for html in html_fragments) or  # HTML fragments
-            cleaned_output.count(' ') < 2  # Less than 3 words (reduced from 4)
+            any(invalid in cleaned_output.lower() for invalid in invalid_responses) or  # Uncertain responses
+            cleaned_output.count(' ') < 3 or  # Need at least 4 words
+            contains_html_garbage  # Contains HTML-like artifacts
         )
         
         if is_invalid:
@@ -1064,6 +854,97 @@ def process_video_segment(model_manager, video_path, prompt, num_frames, start_t
             'frames_processed': len(num_patches_list),
             'segment_start': start_time,
             'segment_end': end_time
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'segment_start': start_time,
+            'segment_end': end_time
+        }
+
+def process_temporal_video_segment(model_manager, video_path, prompt, num_frames, start_time, end_time, fps_sampling):
+    """Process a video segment specifically for detailed temporal analysis with extended generation parameters"""
+    try:
+        import torch
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        
+        if not model_manager.model:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+        
+        # Enhanced prompt for frame-based analysis (will be converted to timestamps later)
+        frame_based_prompt = f"""FRAME-BASED VIDEO ANALYSIS TASK:
+        You are analyzing {num_frames} frames from a video segment.
+        REQUIRED OUTPUT FORMAT:
+        Analyze the frames and provide events with FRAME REFERENCES (not time). Use this format:
+        1. OPENING FRAMES (Frame1-{int(num_frames/4)}): What happens at the very beginning?
+        Frame1: [Describe what's visible in opening frame]
+        Frame5: [Describe early action]
+        
+        2. MIDDLE FRAMES (Frame{int(num_frames/4)+1}-{int(3*num_frames/4)}): What happens in the middle section?
+        Frame{int(num_frames/2)}: [Describe middle action]
+        
+        3. CLOSING FRAMES (Frame{int(3*num_frames/4)+1}-{num_frames}): What happens at the end?
+        Frame{num_frames-5}: [Describe late action]
+        Frame{num_frames}: [Describe final frame]
+        
+        USER QUERY: {prompt}
+        
+        IMPORTANT: Reference specific frames like "Frame1:", "Frame15:", etc. Do not use timestamps.
+        """
+        
+        # Use ModelManager's video processing with custom config
+        temp_video_path = f"/tmp/temp_segment_{start_time}_{end_time}.mp4"
+        
+        # Call ModelManager's process_video method 
+        # Note: We let the ModelManager handle the video naturally and use post-processing for timestamps
+        result = model_manager.process_video(
+            video_path=video_path,
+            prompt=frame_based_prompt,
+            num_frames=num_frames,
+            max_tokens=800,
+            fps_sampling=fps_sampling,
+            start_time=start_time,
+            end_time=end_time
+        )
+        
+        if not result.get('success', False):
+            raise Exception(f"ModelManager video processing failed: {result.get('error', 'Unknown error')}")
+        
+        output = result.get('response', '')
+        
+        # Clean up the output
+        import re
+        cleaned_output = output.strip()
+        
+        # Remove common prefixes
+        prefixes_to_remove = ["Answer: ", "Response: ", "Caption: ", "Description: "]
+        for prefix in prefixes_to_remove:
+            if cleaned_output.startswith(prefix):
+                cleaned_output = cleaned_output[len(prefix):].strip()
+        
+        # Enhanced HTML cleanup for temporal responses
+        cleaned_output = re.sub(r'<[^>]+>', '', cleaned_output)
+        cleaned_output = re.sub(r'&[a-zA-Z]+;', '', cleaned_output)
+        cleaned_output = re.sub(r'</?br\s*/?>', ' ', cleaned_output)
+        cleaned_output = re.sub(r'\s+', ' ', cleaned_output).strip()
+        
+        # Log the temporal analysis result
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"TEMPORAL ANALYSIS RESULT - Segment {start_time:.0f}-{end_time:.0f}s: '{cleaned_output[:200]}{'...' if len(cleaned_output) > 200 else ''}' | Length: {len(cleaned_output)} characters")
+        
+        return {
+            'success': True,
+            'response': cleaned_output,
+            'text': cleaned_output,
+            'frames_processed': num_frames,
+            'segment_start': start_time,
+            'segment_end': end_time,
+            'analysis_type': 'detailed_temporal'
         }
         
     except Exception as e:
@@ -1105,7 +986,7 @@ def process_video_for_caption_streaming(manager, video_path, video_file, fps_sam
         total_frames_processed = 0
         previous_captions = []  # Track context for streaming too
         
-        # Process all chunks with streaming
+        # Process all chunks with streaming using temporal analysis
         for chunk_idx in range(effective_chunks):
             start_time = chunk_idx * chunk_size
             end_time = min((chunk_idx + 1) * chunk_size, duration)
@@ -1117,53 +998,30 @@ def process_video_for_caption_streaming(manager, video_path, video_file, fps_sam
             try:
                 chunk_start_time = time.time()
                 
-                # Use explicit description prompt to avoid tracking mode
-                base_prompt = f"{prompt}"
+                # Create temporal analysis prompt for comprehensive video description
+                temporal_prompt = f"""COMPREHENSIVE VIDEO ANALYSIS TASK:
+
+You are analyzing {chunk_duration:.1f} seconds of video content with frame-by-frame analysis.
+
+Generate a detailed, comprehensive description of what happens throughout this entire video segment.
+
+REQUIRED OUTPUT FORMAT:
+Provide a complete video analysis with frame-by-frame details:
+
+For EACH section, provide:
+- Frame references (e.g., "Frame1:", "Frame15:", "Frame50-75:")
+- Detailed descriptions of actions, characters, settings
+- Key visual details and transitions
+- Emotional tone and narrative progression
+
+FOCUS: {prompt}
+
+IMPORTANT: Reference specific frames like "Frame1:", "Frame15:", etc. Do not use timestamps."""
                 
-                if chunk_idx == 0:
-                    # First chunk - enhanced detail request with anti-tracking instructions
-                    chunk_prompt = f"""IMPORTANT: Write only descriptive text. Do NOT use tracking format or XML tags.
-
-{base_prompt}
-
-Provide a comprehensive, detailed description of what happens in this video segment. Include: setting/environment, people's appearance and actions, objects present, movements, interactions, and any notable details. Write in narrative style with rich visual descriptions. Use only plain text description."""
-                else:
-                    # Subsequent chunks - use last 2 captions for context, focus on NEW content only
-                    if previous_captions:
-                        # Build minimal context from last 1-2 captions
-                        context_parts = []
-                        for i, cap in enumerate(previous_captions[-2:]):  # Last 2 captions max
-                            # Clean numbered lists and extract key info
-                            import re
-                            # Remove numbered list formatting (1., 2., etc.)
-                            cleaned_cap = re.sub(r'^\d+\.\s*', '', cap)
-                            # Remove any leading numbers or bullets
-                            cleaned_cap = re.sub(r'^[\d\-\*\•]\s*', '', cleaned_cap)
-                            # Extract first sentence only (key transition info)
-                            first_sentence = cleaned_cap.split('.')[0][:40] + "..." if len(cleaned_cap) > 40 else cleaned_cap.split('.')[0]
-                            context_parts.append(f"Previous scene: {first_sentence}")
-                        
-                        context_text = " | ".join(context_parts)
-                        
-                        chunk_prompt = f"""CONTEXT: {context_text}
-
-IMPORTANT: Write a fresh, complete description of what happens in THIS video segment. Do NOT continue numbered lists. Do NOT just write numbers. Write full descriptive sentences about the NEW content only.
-
-{base_prompt}
-
-Describe what happens in this video segment with complete sentences. Focus on NEW actions, movements, and events. Start your description directly without numbers or list formatting."""
-                    else:
-                        # No context, standard description request
-                        chunk_prompt = f"""IMPORTANT: Write only descriptive text. Do NOT use tracking format or XML tags.
-
-{base_prompt}
-
-Describe what happens in this specific video segment. Focus on actions, movements, setting, people, and events visible in this time period."""
-                
-                result = process_video_segment(
+                result = process_temporal_video_segment(
                     manager.model_manager,
                     video_path=video_path,
-                    prompt=chunk_prompt,
+                    prompt=temporal_prompt,
                     num_frames=chunk_frames,
                     start_time=start_time,
                     end_time=end_time,
@@ -1172,27 +1030,30 @@ Describe what happens in this specific video segment. Focus on actions, movement
                 
                 chunk_time = time.time() - chunk_start_time
                 
-                if result and ('text' in result or 'response' in result):
-                    caption_text = result.get('text', result.get('response', ''))
+                # Handle temporal analysis result
+                if result and result.get('success') and result.get('response'):
+                    caption_text = result.get('response', '')
+                    logger.info(f"[{request_id}] Temporal analysis successful for chunk {chunk_idx + 1}: {len(caption_text)} characters")
+                    logger.info(f"[{request_id}] Caption preview: {caption_text[:100]}...")
                     
                     # Check if we actually got text content
                     if not caption_text or not caption_text.strip():
-                        error_msg = f"Empty caption returned. Result keys: {result.keys() if result else 'None'}"
+                        error_msg = f"Empty temporal analysis returned. Result keys: {result.keys() if result else 'None'}"
                         if result.get('error'):
                             error_msg += f", Error: {result.get('error')}"
                         yield {'type': 'chunk_error', 'chunk': chunk_idx + 1, 'message': error_msg}
                         continue
                         
-                    # Apply same length limit
-                    MAX_CHUNK_LENGTH = 500
+                    # Apply length limit for temporal analysis (allow longer responses)
+                    MAX_CHUNK_LENGTH = 800  # Increased for temporal analysis
                     if len(caption_text) > MAX_CHUNK_LENGTH:
                         truncate_point = caption_text[:MAX_CHUNK_LENGTH].rfind('. ')
-                        if truncate_point > 300:
+                        if truncate_point > 400:
                             caption_text = caption_text[:truncate_point + 1]
                         else:
                             caption_text = caption_text[:MAX_CHUNK_LENGTH].rsplit(' ', 1)[0] + '...'
                 else:
-                    error_msg = f"No text/response in result. Keys: {result.keys() if result else 'None'}"
+                    error_msg = f"Temporal analysis failed. Keys: {result.keys() if result else 'None'}"
                     if result and result.get('error'):
                         error_msg += f", Error: {result.get('error')}"
                     yield {'type': 'chunk_error', 'chunk': chunk_idx + 1, 'message': error_msg}
@@ -1204,17 +1065,19 @@ Describe what happens in this specific video segment. Focus on actions, movement
                 else:
                     formatted_chunk = caption_text
                 
+                logger.info(f"[{request_id}] Formatted chunk {chunk_idx + 1} length: {len(formatted_chunk)} characters")
+                
                 chunk_captions.append(formatted_chunk)
                 total_frames_processed += chunk_frames
                 
-                # Add to context for next chunks (use raw caption, limit storage)
+                # Add to context for next chunks (use temporal caption, limit storage)
                 previous_captions.append(caption_text)
                 # Keep only last 2 captions to prevent memory buildup
                 if len(previous_captions) > 2:
                     previous_captions = previous_captions[-2:]
                 
                 # Yield chunk completion with the caption
-                yield {
+                chunk_completion = {
                     'type': 'chunk_complete', 
                     'chunk': chunk_idx + 1, 
                     'total_chunks': effective_chunks,
@@ -1224,6 +1087,8 @@ Describe what happens in this specific video segment. Focus on actions, movement
                     'frames': chunk_frames,
                     'progress': ((chunk_idx + 1) / effective_chunks) * 100
                 }
+                logger.info(f"[{request_id}] Sending chunk completion: {chunk_idx + 1}/{effective_chunks}, caption length: {len(formatted_chunk)}")
+                yield chunk_completion
                 
                 # Selective cleanup - only every 3 chunks or on last chunk to balance memory vs speed
                 if (chunk_idx + 1) % 3 == 0 or chunk_idx == effective_chunks - 1:
@@ -1244,17 +1109,17 @@ Describe what happens in this specific video segment. Focus on actions, movement
             yield {'type': 'error', 'message': 'No video chunks were successfully processed'}
             return
         
-        # Combine all captions based on output format
+        # Combine all captions based on output format with temporal analysis
         if output_format == 'timestamped':
-            final_caption = f"**Timestamped Video Caption ({video_file}):**\n\n" + "\n\n".join(chunk_captions)
+            final_caption = f"**Temporal Analysis Video Caption ({video_file}):**\n\n**Analysis Method:** InternVideo2.5 Frame-by-Frame Analysis\n\n" + "\n\n".join(chunk_captions)
         elif output_format == 'detailed':
-            final_caption = f"**Detailed Video Analysis ({video_file}):**\n\n**Technical Details:**\n- Video Duration: {duration:.1f}s\n- Chunk Size: {chunk_size}s\n- Chunks Processed: {len(chunk_captions)}/{effective_chunks}\n- Frame Sampling: {fps_sampling} FPS ({total_frames_processed} total frames)\n- Processing Mode: {processing_mode}\n\n**Content Analysis by Time Segments:**\n\n" + "\n\n".join(chunk_captions)
+            final_caption = f"**Temporal Video Analysis ({video_file}):**\n\n**Technical Details:**\n- Video Duration: {duration:.1f}s\n- Chunk Size: {chunk_size}s\n- Chunks Processed: {len(chunk_captions)}/{effective_chunks}\n- Frame Sampling: {fps_sampling} FPS ({total_frames_processed} total frames)\n- Analysis Method: InternVideo2.5 Temporal Analysis\n\n**Frame-by-Frame Analysis by Time Segments:**\n\n" + "\n\n".join(chunk_captions)
         elif output_format == 'summary':
             all_content = " ".join([cap.split("**", 2)[-1] if "**" in cap else cap for cap in chunk_captions])
             summary = all_content[:300] + "..." if len(all_content) > 300 else all_content
-            final_caption = f"**Video Summary + Details ({video_file}):**\n\n**Quick Summary:** {summary}\n\n**Detailed Timeline:**\n\n" + "\n\n".join(chunk_captions)
+            final_caption = f"**Temporal Video Summary + Details ({video_file}):**\n\n**Quick Summary:** {summary}\n\n**Frame-by-Frame Timeline:**\n\n" + "\n\n".join(chunk_captions)
         else:  # paragraph format
-            final_caption = f"**Video Caption ({video_file}):**\n\n"
+            final_caption = f"**Temporal Video Caption ({video_file}):**\n\n**Analysis Method:** InternVideo2.5 Temporal Analysis\n\n"
             clean_chunks = []
             for chunk in chunk_captions:
                 if "**[" in chunk and "]**" in chunk:
@@ -1267,13 +1132,17 @@ Describe what happens in this specific video segment. Focus on actions, movement
         import html
         final_caption = html.unescape(final_caption).replace('\x00', '').strip()
         
-        # Final result
+        # Final result with temporal analysis metadata
         yield {
             'type': 'complete',
             'caption': final_caption,
             'total_frames': total_frames_processed,
             'chunks_processed': len(chunk_captions),
-            'success': True
+            'success': True,
+            'analysis_method': 'InternVideo2.5 Temporal Analysis',
+            'processing_mode': 'temporal_analysis',
+            'fps_used': fps_sampling,
+            'chunk_size': chunk_size
         }
         
     except Exception as e:
@@ -2243,6 +2112,429 @@ def debug_reset_storage():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+@app.route('/serve-video/<path:filename>')
+def serve_video(filename):
+    """Serve video files with proper streaming support"""
+    try:
+        video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
+        if not os.path.exists(video_path):
+            return jsonify({'error': 'Video not found'}), 404
+        
+        # Get file size
+        file_size = os.path.getsize(video_path)
+        
+        # Parse range header for video streaming
+        range_header = request.headers.get('range', None)
+        
+        if range_header:
+            # Parse the range header
+            byte_start = 0
+            byte_end = file_size - 1
+            
+            if range_header:
+                match = re.search(r'bytes=(\d+)-(\d*)', range_header)
+                if match:
+                    byte_start = int(match.group(1))
+                    if match.group(2):
+                        byte_end = int(match.group(2))
+            
+            # Open file and seek to start position
+            with open(video_path, 'rb') as video_file:
+                video_file.seek(byte_start)
+                data = video_file.read(byte_end - byte_start + 1)
+            
+            # Create response with partial content
+            response = Response(
+                data,
+                206,  # Partial Content
+                mimetype="video/mp4",
+                headers={
+                    'Content-Range': f'bytes {byte_start}-{byte_end}/{file_size}',
+                    'Accept-Ranges': 'bytes',
+                    'Content-Length': str(byte_end - byte_start + 1)
+                }
+            )
+        else:
+            # Serve entire file
+            return send_file(video_path, mimetype='video/mp4')
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error serving video {filename}: {str(e)}")
+        return jsonify({'error': f'Error serving video: {str(e)}'}), 500
+
+@app.route('/api/temporal-analysis', methods=['POST'])
+def temporal_analysis():
+    """Perform enhanced temporal analysis on a video segment using InternVideo2.5"""
+    request_id = str(int(time.time()))[-6:]
+    try:
+        data = request.get_json()
+        video_file = data.get('video_file')
+        start_time = data.get('start_time', 0)
+        end_time = data.get('end_time', 0)
+        chunk_caption = data.get('chunk_caption', '')
+        query = data.get('query', '')
+        
+        logger.info(f"[{request_id}] Temporal Analysis Request:")
+        logger.info(f"[{request_id}]   - Video: {video_file}")
+        logger.info(f"[{request_id}]   - Segment: {start_time:.1f}s - {end_time:.1f}s")
+        logger.info(f"[{request_id}]   - Query: {query}")
+        
+        # Get model manager for InternVideo2.5 analysis
+        global enhanced_manager
+        manager = enhanced_manager
+        temporal_result = {
+            'success': True,
+            'temporal_analysis': f"This segment from {start_time:.1f}s to {end_time:.1f}s contains content that matches your query: '{query}'.",
+            'key_events': [
+                f"Segment begins at {start_time:.1f} seconds",
+                f"Key content identified matching '{query}'",
+                f"Segment ends at {end_time:.1f} seconds"
+            ],
+            'segment_duration': end_time - start_time,
+            'internvideo_analysis': None
+        }
+        
+        # Enhanced InternVideo2.5 temporal analysis if model is available
+        if manager and hasattr(manager, 'model_manager') and manager.model_manager.model:
+            try:
+                video_path = os.path.join(app.config['UPLOAD_FOLDER'], video_file)
+                if os.path.exists(video_path):
+                    logger.info(f"[{request_id}] Running InternVideo2.5 temporal analysis...")
+                    
+                    # Fetch original FPS from database for this video
+                    original_fps = 2.0  # Default fallback with higher FPS
+                    try:
+                        import sqlite3
+                        db_path = "/workspace/surveillance/captions.db"
+                        conn = sqlite3.connect(db_path)
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            SELECT fps FROM video_captions 
+                            WHERE video_file = ? 
+                            ORDER BY created_at DESC 
+                            LIMIT 1
+                        """, (video_file,))
+                        result = cursor.fetchone()
+                        if result and result[0]:
+                            original_fps = float(result[0])
+                            logger.info(f"[{request_id}] Using original FPS from database: {original_fps}")
+                        else:
+                            logger.info(f"[{request_id}] No FPS found in database for {video_file}, using default {original_fps}")
+                        conn.close()
+                    except Exception as db_error:
+                        logger.warning(f"[{request_id}] Could not fetch FPS from database: {str(db_error)}, using default {original_fps}")
+                    
+                    # Calculate segment duration and frame sampling
+                    segment_duration = end_time - start_time
+                    
+                    # Use EXACT FPS from database - no modifications or restrictions
+                    fps_sampling = original_fps  # Use original FPS from database
+                    
+                    # Calculate frames based on segment duration and original FPS
+                    # NO LIMITS - use all frames for full temporal coverage
+                    num_frames = int(fps_sampling * segment_duration)
+                    
+                    # No restrictions on frame count - use all calculated frames
+                    logger.info(f"[{request_id}] Using UNLIMITED frames: {num_frames} frames at {fps_sampling} FPS for {segment_duration}s segment")
+                    
+                    logger.info(f"[{request_id}] Segment analysis params: {num_frames} frames, {fps_sampling:.2f} FPS")
+                    
+                    # Create temporal analysis prompt for comprehensive video description (same as caption generator)
+                    temporal_prompt = f"""COMPREHENSIVE VIDEO ANALYSIS TASK:
+
+You are analyzing {segment_duration:.1f} seconds of video content with frame-by-frame analysis.
+
+Generate a detailed, comprehensive description of what happens throughout this entire video segment.
+
+REQUIRED OUTPUT FORMAT:
+Provide a complete video analysis with frame-by-frame details:
+
+For EACH section, provide:
+- Frame references (e.g., "Frame1:", "Frame15:", "Frame50-75:")
+- Detailed descriptions of actions, characters, settings
+- Key visual details and transitions
+- Emotional tone and narrative progression
+
+FOCUS: {query}
+
+IMPORTANT: Reference specific frames like "Frame1:", "Frame15:", etc. Do not use timestamps."""
+
+                    # Process video segment with InternVideo2.5 using custom temporal analysis generation
+                    try:
+                        # Use a custom temporal analysis call with extended generation parameters
+                        result = process_temporal_video_segment(
+                            manager.model_manager,
+                            video_path=video_path,
+                            prompt=temporal_prompt,
+                            num_frames=num_frames,
+                            start_time=start_time,
+                            end_time=end_time,
+                            fps_sampling=fps_sampling
+                        )
+                        
+                        if result:
+                            logger.info(f"[{request_id}] Temporal segment result: success={result.get('success')}, has_response={bool(result.get('response'))}, error={result.get('error')}")
+                            
+                            if result.get('success') and result.get('response'):
+                                frame_based_response = result['response']
+                                logger.info(f"[{request_id}] Got InternVideo frame-based response: {len(frame_based_response)} chars")
+                                
+                                # Convert frame references to actual timestamps
+                                internvideo_response = convert_frames_to_timestamps(
+                                    frame_based_response, 
+                                    start_time, 
+                                    end_time, 
+                                    num_frames,
+                                    fps_sampling
+                                )
+                                logger.info(f"[{request_id}] Converted to timestamp-based response: {len(internvideo_response)} chars")
+                                
+                            elif result.get('error'):
+                                raise Exception(f"InternVideo2.5 error: {result.get('error')}")
+                            else:
+                                raise Exception(f"No response from InternVideo2.5 model - result: {result}")
+                        else:
+                            raise Exception("process_temporal_video_segment returned None")
+                            
+                    except Exception as segment_error:
+                        logger.error(f"[{request_id}] Segment processing failed: {str(segment_error)}")
+                        raise
+                    
+                    temporal_result['internvideo_analysis'] = internvideo_response
+                    temporal_result['temporal_analysis'] = internvideo_response
+                    temporal_result['analysis_method'] = 'InternVideo2.5 Enhanced Temporal Analysis'
+                    
+                    # Extract key events from InternVideo response
+                    events = extract_temporal_events(internvideo_response, start_time, end_time)
+                    if events:
+                        temporal_result['key_events'] = events
+                    
+                    logger.info(f"[{request_id}] InternVideo2.5 temporal analysis completed")
+                    
+                else:
+                    logger.error(f"[{request_id}] Video file not found: {video_path}")
+                    temporal_result['success'] = False
+                    temporal_result['error'] = f"Video file not found: {video_file}"
+                    temporal_result['temporal_analysis'] = "Unable to perform temporal analysis - video file not found"
+                    
+            except Exception as model_error:
+                logger.error(f"[{request_id}] InternVideo2.5 analysis CRITICAL ERROR: {str(model_error)}")
+                temporal_result['success'] = False
+                temporal_result['error'] = f"InternVideo2.5 analysis error: {str(model_error)}"
+                temporal_result['temporal_analysis'] = f"InternVideo2.5 temporal analysis failed: {str(model_error)}"
+                temporal_result['analysis_method'] = 'InternVideo2.5 (Failed)'
+        else:
+            # Model not available - NO FALLBACK TO GPT-4
+            logger.error(f"[{request_id}] InternVideo2.5 model not available for temporal analysis")
+            temporal_result['success'] = False
+            temporal_result['error'] = "InternVideo2.5 model not loaded or not available"
+            temporal_result['temporal_analysis'] = "InternVideo2.5 model is required for temporal analysis but is not currently loaded"
+            temporal_result['analysis_method'] = 'InternVideo2.5 (Not Available)'
+        
+        # NO FALLBACK - Remove all GPT-4o mini code
+        # Only InternVideo2.5 is used for temporal analysis
+        if False and client and chunk_caption and not temporal_result.get('internvideo_analysis'):
+            try:
+                prompt = f"""Analyze this video segment for temporal relevance:
+
+User Query: {query}
+Time Range: {start_time:.1f}s - {end_time:.1f}s (Duration: {end_time - start_time:.1f}s)
+Segment Content: {chunk_caption}
+
+Provide:
+1. Why this segment is relevant to the query
+2. Key temporal moments within the segment
+3. Specific actions or events that occur
+4. How the timing relates to the user's investigation
+
+Focus on temporal aspects and specific timing details."""
+                
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a video temporal analysis expert providing detailed timing insights."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=250,
+                    temperature=0.3
+                )
+                
+                temporal_result['temporal_analysis'] = response.choices[0].message.content
+                temporal_result['analysis_method'] = 'GPT-4o Mini Enhanced Analysis'
+                
+            except Exception as ai_error:
+                logger.warning(f"[{request_id}] OpenAI analysis failed: {str(ai_error)}")
+        
+        # Ensure all values in temporal_result are JSON serializable
+        def sanitize_for_json(obj):
+            """Recursively convert numpy/torch types to JSON-serializable types"""
+            if hasattr(obj, 'dtype'):  # numpy arrays, scalars
+                if hasattr(obj, 'item'):  # numpy scalars
+                    return obj.item()
+                return obj.tolist()
+            elif hasattr(obj, 'is_tensor') and obj.is_tensor:  # torch tensors
+                return obj.detach().cpu().numpy().tolist()
+            elif isinstance(obj, dict):
+                return {k: sanitize_for_json(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [sanitize_for_json(item) for item in obj]
+            else:
+                return obj
+        
+        sanitized_result = sanitize_for_json(temporal_result)
+        return jsonify(sanitized_result)
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] Temporal analysis error: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def convert_frames_to_timestamps(frame_response: str, start_time: float, end_time: float, num_frames: int, fps_sampling: float) -> str:
+    """Convert frame-based InternVideo response to timestamp-based response"""
+    import re
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    # Calculate time per frame
+    segment_duration = end_time - start_time
+    time_per_frame = segment_duration / num_frames if num_frames > 0 else 1.0
+    
+    logger.info(f"Frame-to-timestamp conversion: {num_frames} frames, {segment_duration:.1f}s duration, {time_per_frame:.3f}s per frame")
+    
+    def frame_to_timestamp(frame_num: int) -> float:
+        """Convert frame number to actual timestamp"""
+        # Frame1 = start_time, Frame2 = start_time + time_per_frame, etc.
+        return start_time + (frame_num - 1) * time_per_frame
+    
+    def format_timestamp(timestamp: float) -> str:
+        """Format timestamp for display"""
+        return f"{timestamp:.1f}s"
+    
+    # Convert frame references to timestamps
+    converted_response = frame_response
+    
+    # Pattern 1: "Frame5:" -> "At 289.0s:"
+    def replace_single_frame(match):
+        frame_num = int(match.group(1))
+        timestamp = frame_to_timestamp(frame_num)
+        return f"At {format_timestamp(timestamp)}:"
+    
+    converted_response = re.sub(r'Frame(\d+):', replace_single_frame, converted_response)
+    
+    # Pattern 2: "Around Frame12" -> "Around 291.5s"
+    def replace_around_frame(match):
+        frame_num = int(match.group(1))
+        timestamp = frame_to_timestamp(frame_num)
+        return f"Around {format_timestamp(timestamp)}"
+    
+    converted_response = re.sub(r'Around Frame(\d+)', replace_around_frame, converted_response)
+    
+    # Pattern 3: "Frame25-30:" -> "From 295.0s-297.5s:"
+    def replace_frame_range(match):
+        start_frame = int(match.group(1))
+        end_frame = int(match.group(2))
+        start_timestamp = frame_to_timestamp(start_frame)
+        end_timestamp = frame_to_timestamp(end_frame)
+        return f"From {format_timestamp(start_timestamp)}-{format_timestamp(end_timestamp)}:"
+    
+    converted_response = re.sub(r'Frame(\d+)-(\d+):', replace_frame_range, converted_response)
+    
+    # Pattern 4: "FRAMES (Frame1-24)" -> "EARLY PERIOD (288.0s-294.0s)"
+    def replace_frame_section(match):
+        section_name = match.group(1)
+        start_frame = int(match.group(2))
+        end_frame = int(match.group(3))
+        start_timestamp = frame_to_timestamp(start_frame)
+        end_timestamp = frame_to_timestamp(end_frame)
+        return f"{section_name} ({format_timestamp(start_timestamp)}-{format_timestamp(end_timestamp)})"
+    
+    converted_response = re.sub(r'(\w+ FRAMES) \(Frame(\d+)-(\d+)\)', replace_frame_section, converted_response)
+    
+    # Add timestamp context at the beginning
+    timestamp_header = f"TEMPORAL ANALYSIS ({format_timestamp(start_time)}-{format_timestamp(end_time)}, {num_frames} frames analyzed):\n\n"
+    
+    return timestamp_header + converted_response
+
+def extract_temporal_events(response_text: str, start_time: float, end_time: float) -> List[str]:
+    """Extract temporal events from InternVideo2.5 response with enhanced timestamp parsing"""
+    try:
+        events = []
+        lines = response_text.split('\n')
+        
+        # Enhanced patterns to detect temporal descriptions
+        import re
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Look for timestamp patterns in the response
+            timestamp_patterns = [
+                r'(at|around|near|by)\s+(\d+(?:\.\d+)?)\s*s(?:econds?)?',  # "at 96.5s" or "around 120 seconds"
+                r'(\d+(?:\.\d+)?)\s*s(?:econds?)?\s*[:,]\s*(.+)',  # "96.5s: action happens"
+                r'(at|around|near|by)\s+(\d+:\d+(?:\.\d+)?)',  # "at 1:36" format
+                r'(beginning|start|end|middle|halfway)',  # Relative positions
+            ]
+            
+            # Check if line contains temporal information
+            has_temporal = False
+            for pattern in timestamp_patterns:
+                if re.search(pattern, line, re.IGNORECASE):
+                    has_temporal = True
+                    break
+            
+            # Also check for general temporal keywords
+            if not has_temporal:
+                temporal_keywords = ['at', 'during', 'when', 'then', 'after', 'before', 'second', 'moment', 'time']
+                has_temporal = any(keyword in line.lower() for keyword in temporal_keywords)
+            
+            if has_temporal:
+                # Clean up the line
+                if line.startswith('-') or line.startswith('*') or line.startswith('•'):
+                    line = line[1:].strip()
+                if line.startswith(('1.', '2.', '3.', '4.', '5.')):
+                    line = line[2:].strip()
+                    
+                if line and len(line) > 15:  # Avoid very short fragments
+                    events.append(line)
+        
+        # If no specific temporal events found, extract key descriptive sentences
+        if not events:
+            for line in lines:
+                line = line.strip()
+                if line and len(line) > 20 and not line.startswith(('VIDEO', 'SEGMENT', 'USER', 'IMPORTANT')):
+                    # Clean up the line
+                    if line.startswith('-') or line.startswith('*') or line.startswith('•'):
+                        line = line[1:].strip()
+                    if line.startswith(('1.', '2.', '3.', '4.', '5.')):
+                        line = line[2:].strip()
+                    events.append(line)
+                    if len(events) >= 3:
+                        break
+        
+        # If still no events, create informative ones based on the segment
+        if not events:
+            segment_duration = end_time - start_time
+            events = [
+                f"Analysis of {segment_duration:.1f}-second segment from {start_time:.1f}s to {end_time:.1f}s",
+                f"Key temporal events identified within the specified timeframe",
+                f"Content analyzed using InternVideo2.5's temporal understanding"
+            ]
+        
+        return events[:5]  # Limit to 5 events
+        
+    except Exception as e:
+        logger.warning(f"Error extracting temporal events: {str(e)}")
+        return [
+            f"Temporal analysis of segment {start_time:.1f}s - {end_time:.1f}s",
+            f"Duration: {end_time - start_time:.1f} seconds analyzed"
+        ]
 
 @app.route('/api/find-relevant-chunk', methods=['POST'])
 def find_relevant_chunk():
