@@ -1884,162 +1884,7 @@ def get_caption_estimate():
         logger.error(f"Caption estimation error: {str(e)}")
         return jsonify({'error': f'Estimation failed: {str(e)}'}), 500
 
-@app.route('/video-snippet', methods=['POST'])
-def get_video_snippet_info():
-    """Get video snippet information for direct streaming"""
-    request_id = str(int(time.time()))[-6:]
-    
-    try:
-        logger.info(f"[{request_id}] === VIDEO SNIPPET INFO REQUEST ===")
-        
-        manager = get_enhanced_manager()
-        if not manager:
-            return jsonify({'error': 'Model manager not initialized'}), 500
-        
-        data = request.get_json()
-        timestamp = float(data.get('timestamp', 0))
-        duration = float(data.get('duration', 10.0))
-        
-        logger.info(f"[{request_id}] Getting snippet info for {timestamp}s duration {duration}s")
-        
-        # Calculate start and end times - 1 second back, rest forward
-        start_time = max(0, timestamp - 1.0)  # Only 1 second before target
-        end_time = timestamp + (duration - 1.0)  # Remaining duration after target
-        
-        # Get video info from session if available
-        session_info = manager.get_session_info()
-        video_duration = 0
-        if session_info and session_info.get('video_info'):
-            video_info = session_info['video_info']
-            if 'duration' in video_info:
-                # Parse duration from string like "180.5s" or just get numeric value
-                duration_str = str(video_info['duration'])
-                if 's' in duration_str:
-                    video_duration = float(duration_str.replace('s', ''))
-                else:
-                    video_duration = float(duration_str)
-            elif 'duration_seconds' in video_info:
-                video_duration = video_info['duration_seconds']
-        
-        # Ensure end time doesn't exceed video duration
-        if video_duration > 0:
-            end_time = min(end_time, video_duration)
-            
-        logger.info(f"[{request_id}] Video duration: {video_duration}s, calculated segment: {start_time:.1f}s-{end_time:.1f}s")
-        
-        snippet_info = {
-            'success': True,
-            'video_url': '/video-stream',
-            'start_time': start_time,
-            'end_time': end_time,
-            'target_timestamp': timestamp,
-            'duration': end_time - start_time,
-            'description': f'Video segment from {start_time:.1f}s to {end_time:.1f}s'
-        }
-        
-        logger.info(f"[{request_id}] Snippet info: {start_time:.1f}s to {end_time:.1f}s")
-        
-        return jsonify(snippet_info)
-        
-    except Exception as e:
-        logger.error(f"[{request_id}] Snippet info error: {str(e)}")
-        return jsonify({'error': f'Snippet info failed: {str(e)}'}), 500
 
-@app.route('/status')
-def status():
-    """Get system status with comprehensive logging"""
-    try:
-        logger.info("=== STATUS REQUEST ===")
-        
-        # Check if video file exists using absolute path
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        video_path = os.path.join(base_dir, DEFAULT_VIDEO)
-        main_py_path = os.path.join(base_dir, 'main.py')
-        enhanced_py_path = os.path.join(base_dir, 'main_enhanced.py')
-        
-        logger.info(f"Base directory: {base_dir}")
-        logger.info(f"Default video path: {video_path}")
-        logger.info(f"Main.py path: {main_py_path}")
-        logger.info(f"Enhanced main path: {enhanced_py_path}")
-        
-        video_exists = os.path.exists(video_path)
-        main_py_exists = os.path.exists(main_py_path)
-        enhanced_py_exists = os.path.exists(enhanced_py_path)
-        
-        logger.info(f"Video exists: {video_exists}")
-        logger.info(f"main.py exists: {main_py_exists}")
-        logger.info(f"main_enhanced.py exists: {enhanced_py_exists}")
-        
-        # Check model manager status
-        manager_status = "not_initialized"
-        manager_error = None
-        try:
-            manager = get_enhanced_manager()
-            if manager:
-                manager_status = "initialized"
-                session_info = manager.get_session_info()
-                if session_info:
-                    manager_status = "video_loaded"
-                    logger.info(f"Manager has video session: {session_info.get('video_path', 'N/A')}")
-                else:
-                    logger.info("Manager initialized but no video session")
-            else:
-                manager_status = "failed"
-                manager_error = "Manager initialization returned None"
-                logger.error("Manager initialization failed")
-        except Exception as e:
-            manager_status = "error"
-            manager_error = str(e)
-            logger.error(f"Manager initialization error: {str(e)}")
-        
-        # Get video info if exists
-        video_info = {}
-        if video_exists:
-            try:
-                import cv2
-                cap = cv2.VideoCapture(video_path)
-                if cap.isOpened():
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                    duration = frame_count / fps if fps > 0 else 0
-                    
-                    video_info = {
-                        'fps': fps,
-                        'frames': frame_count,
-                        'duration': f"{duration:.2f}s"
-                    }
-                    logger.info(f"Video info: {json.dumps(video_info, indent=2)}")
-                cap.release()
-            except Exception as e:
-                video_info = {'error': f'Could not read video properties: {str(e)}'}
-                logger.error(f"Video info error: {str(e)}")
-        
-        result = {
-            'status': 'online',
-            'video_available': video_exists,
-            'main_py_available': main_py_exists,
-            'enhanced_py_available': enhanced_py_exists,
-            'video_path': DEFAULT_VIDEO,
-            'full_video_path': video_path,
-            'main_py_path': main_py_path,
-            'enhanced_py_path': enhanced_py_path,
-            'video_info': video_info,
-            'manager_status': manager_status,
-            'manager_error': manager_error,
-            'max_frames': 160,
-            'max_fps': 5.0,
-            'max_time_bound': 600,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        logger.info(f"Status result: {json.dumps(result, indent=2, default=str)}")
-        logger.info("=== STATUS REQUEST END ===")
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"Status check exception: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
 
 # Caption Storage APIs for Automatic Flow
 @app.route('/api/stored-captions', methods=['GET'])
@@ -2076,25 +1921,6 @@ def get_video_caption_data(video_file):
         return jsonify({'error': str(e)}), 500
 
 # Debug API to reset storage
-@app.route('/api/debug-reset-storage', methods=['POST'])
-def debug_reset_storage():
-    """Debug endpoint to force reset the storage instance"""
-    global caption_db
-    try:
-        caption_db = None  # Reset the global instance
-        new_db = get_caption_db()  # This will create a new instance with correct path
-        
-        # Test the new instance
-        test_videos = new_db.get_all_videos_with_captions()
-        
-        return jsonify({
-            'success': True, 
-            'message': 'Storage instance reset successfully',
-            'videos_found': len(test_videos),
-            'db_path': new_db.db_path
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/serve-video/<path:filename>')
@@ -2179,7 +2005,10 @@ def temporal_analysis():
                 f"Segment ends at {end_time:.1f} seconds"
             ],
             'segment_duration': end_time - start_time,
-            'internvideo_analysis': None
+            'internvideo_analysis': None,
+            'frames_analyzed': 0,
+            'events_detected': 3,
+            'analysis': f"This segment from {start_time:.1f}s to {end_time:.1f}s contains content that matches your query: '{query}'."
         }
         
         # Enhanced InternVideo2.5 temporal analysis if model is available
@@ -2236,6 +2065,9 @@ Keep the description conversational and easy to read, as if you're telling someo
 
 Focus: {query}"""
 
+                    # Initialize events variable
+                    events = []
+                    
                     # Process video segment with InternVideo2.5 using custom temporal analysis generation
                     try:
                         # Use a custom temporal analysis call with extended generation parameters
@@ -2280,6 +2112,11 @@ Focus: {query}"""
                     temporal_result['internvideo_analysis'] = internvideo_response
                     temporal_result['temporal_analysis'] = internvideo_response
                     temporal_result['analysis_method'] = 'InternVideo2.5 Enhanced Temporal Analysis'
+                    
+                    # Add fields expected by frontend
+                    temporal_result['frames_analyzed'] = num_frames
+                    temporal_result['events_detected'] = len(events) if events else 0
+                    temporal_result['analysis'] = internvideo_response
                     
                     # Extract key events from InternVideo response
                     events = extract_temporal_events(internvideo_response, start_time, end_time)

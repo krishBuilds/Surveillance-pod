@@ -160,13 +160,17 @@ class SurveillanceApp {
         if (videoSelector) {
             videoSelector.addEventListener('change', async (e) => {
                 const videoFile = e.target.value;
+                const temporalBtn = document.getElementById('temporal-analysis-btn');
+                
                 if (videoFile) {
                     await this.displayVideoInfoForAnalysis(videoFile);
                     await this.loadChunkDataForAnalysis(videoFile);
                     if (analyzeBtn) analyzeBtn.disabled = false;
+                    if (temporalBtn) temporalBtn.disabled = false;
                 } else {
                     this.hideVideoInfoDisplay();
                     if (analyzeBtn) analyzeBtn.disabled = true;
+                    if (temporalBtn) temporalBtn.disabled = true;
                 }
             });
         }
@@ -177,6 +181,23 @@ class SurveillanceApp {
                 const query = document.getElementById('chunk-query')?.value?.trim();
                 if (videoFile && query) {
                     await this.findRelevantChunk(videoFile, query);
+                }
+            });
+        }
+
+        // Temporal analysis button
+        const temporalBtn = document.getElementById('temporal-analysis-btn');
+        if (temporalBtn) {
+            temporalBtn.addEventListener('click', async () => {
+                const videoFile = videoSelector?.value;
+                const query = document.getElementById('chunk-query')?.value?.trim();
+                const startTime = parseFloat(document.getElementById('temporal-start-time')?.value) || 0;
+                const endTime = parseFloat(document.getElementById('temporal-end-time')?.value) || 0;
+                
+                if (videoFile && query && startTime >= 0 && endTime > startTime) {
+                    await this.performTemporalAnalysis(videoFile, query, startTime, endTime);
+                } else {
+                    showNotification('❌ Please fill in query and valid time range', 'error', 3000);
                 }
             });
         }
@@ -264,6 +285,8 @@ class SurveillanceApp {
             const data = result.data || result; // Handle nested data structure
             
             const chunkDataTextarea = document.getElementById('chunk-data');
+            const currentVideoFile = document.getElementById('current-video-file');
+            
             if (chunkDataTextarea && data.chunks) {
                 // Format chunks for display
                 const formattedChunks = data.chunks.map(chunk => ({
@@ -273,6 +296,11 @@ class SurveillanceApp {
                     caption: chunk.caption || ''
                 }));
                 chunkDataTextarea.value = JSON.stringify(formattedChunks, null, 2);
+            }
+            
+            // Store current video file for segment playback
+            if (currentVideoFile) {
+                currentVideoFile.value = videoFile;
             }
         } catch (error) {
             console.error('Error loading chunk data:', error);
@@ -335,6 +363,10 @@ class SurveillanceApp {
                     'result-end-time': this.formatTime(endTime),
                     'result-duration': duration.toFixed(1),
                     'result-caption': result.chunk_details.caption || '-',
+                    'result-analysis': result.analysis || 'No analysis available',
+                    'result-confidence': result.confidence_score || '-',
+                    'result-relevance': result.relevance_score || '-',
+                    'result-events': result.events_count || '-',
                     'analysis-time': formatDuration(processingTime)
                 };
                 
@@ -342,6 +374,20 @@ class SurveillanceApp {
                     const element = document.getElementById(id);
                     if (element) element.textContent = value;
                 });
+                
+                // Update segment time range display
+                const segmentTimeRange = document.getElementById('segment-time-range');
+                if (segmentTimeRange) {
+                    segmentTimeRange.textContent = `${this.formatTime(startTime)} to ${this.formatTime(endTime)}`;
+                }
+                
+                // Store segment timing for playback
+                const playSegmentBtn = document.getElementById('play-segment-btn');
+                if (playSegmentBtn) {
+                    playSegmentBtn.dataset.startTime = startTime;
+                    playSegmentBtn.dataset.endTime = endTime;
+                    playSegmentBtn.onclick = () => this.playVideoSegment(startTime, endTime);
+                }
                 
                 // Show completion notification with timing
                 showNotification(
@@ -367,6 +413,134 @@ class SurveillanceApp {
             
             showNotification(
                 `❌ Analysis failed after ${formatDuration(processingTime)}`, 
+                'error', 
+                6000
+            );
+        }
+    }
+
+    playVideoSegment(startTime, endTime) {
+        const videoPlayer = document.getElementById('analysis-preview-player');
+        const currentVideoFile = document.getElementById('current-video-file');
+        
+        if (!videoPlayer || !currentVideoFile || !currentVideoFile.value) {
+            showNotification('❌ No video loaded for playback', 'error', 3000);
+            return;
+        }
+        
+        // Ensure video is loaded and ready
+        if (videoPlayer.src !== `/serve-video/${currentVideoFile.value}`) {
+            videoPlayer.src = `/serve-video/${currentVideoFile.value}`;
+            videoPlayer.load();
+        }
+        
+        // Set up time update event listener to stop at end time
+        const handleTimeUpdate = () => {
+            if (videoPlayer.currentTime >= endTime) {
+                videoPlayer.pause();
+                videoPlayer.removeEventListener('timeupdate', handleTimeUpdate);
+                showNotification('⏹️ Segment playback completed', 'info', 2000);
+            }
+        };
+        
+        // Remove any existing listener
+        videoPlayer.removeEventListener('timeupdate', handleTimeUpdate);
+        
+        // Add new listener and start playback
+        videoPlayer.addEventListener('timeupdate', handleTimeUpdate);
+        
+        // Seek to start time and play
+        videoPlayer.currentTime = startTime;
+        videoPlayer.play()
+            .then(() => {
+                showNotification(`▶️ Playing segment: ${this.formatTime(startTime)} to ${this.formatTime(endTime)}`, 'success', 2000);
+            })
+            .catch(error => {
+                console.error('Playback failed:', error);
+                showNotification('❌ Failed to play video segment', 'error', 3000);
+                videoPlayer.removeEventListener('timeupdate', handleTimeUpdate);
+            });
+    }
+
+    async performTemporalAnalysis(videoFile, query, startTime, endTime) {
+        const loadingDiv = document.getElementById('temporal-analysis-loading');
+        const resultsDiv = document.getElementById('temporal-analysis-results');
+        const placeholderDiv = document.getElementById('temporal-analysis-placeholder');
+        
+        // Show loading state
+        const analysisTimer = this.startTiming();
+        if (loadingDiv) loadingDiv.style.display = 'block';
+        if (resultsDiv) resultsDiv.style.display = 'none';
+        
+        // Hide chunk analysis results and show temporal results
+        document.getElementById('chunk-analysis-results').classList.add('hidden');
+        
+        // Show start notification
+        showNotification('🔍 Starting temporal analysis...', 'info', 3000);
+        
+        try {
+            const response = await fetch('/api/temporal-analysis', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    video_file: videoFile,
+                    query: query,
+                    start_time: startTime,
+                    end_time: endTime
+                })
+            });
+            
+            const result = await response.json();
+            const processingTime = analysisTimer.end();
+            
+            if (result.success) {
+                // Hide loading and show results
+                if (loadingDiv) loadingDiv.style.display = 'none';
+                if (resultsDiv) resultsDiv.style.display = 'block';
+                
+                const duration = endTime - startTime;
+                
+                // Update temporal analysis displays
+                const elements = {
+                    'temporal-time-range': `${this.formatTime(startTime)} to ${this.formatTime(endTime)}`,
+                    'temporal-duration': `${duration.toFixed(1)}s`,
+                    'temporal-frames': result.frames_analyzed || '-',
+                    'temporal-events': result.events_detected || '-',
+                    'temporal-analysis-content': result.analysis || 'No analysis available'
+                };
+                
+                Object.entries(elements).forEach(([id, value]) => {
+                    const element = document.getElementById(id);
+                    if (element) {
+                        element.textContent = value;
+                    }
+                });
+                
+                // Setup play temporal segment button
+                const playTemporalBtn = document.getElementById('play-temporal-btn');
+                if (playTemporalBtn) {
+                    playTemporalBtn.onclick = () => this.playVideoSegment(startTime, endTime);
+                    document.getElementById('temporal-segment-info').textContent = 
+                        `${duration.toFixed(1)}s segment ready`;
+                }
+                
+                // Show completion notification
+                showNotification(
+                    `✅ Temporal analysis completed in ${formatDuration(processingTime)}`, 
+                    'success', 
+                    4000
+                );
+            } else {
+                throw new Error(result.error || 'Temporal analysis failed');
+            }
+        } catch (error) {
+            console.error('Error performing temporal analysis:', error);
+            const processingTime = analysisTimer.end();
+            
+            showNotification(
+                `❌ Temporal analysis failed after ${formatDuration(processingTime)}`, 
                 'error', 
                 6000
             );

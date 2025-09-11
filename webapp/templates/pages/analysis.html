@@ -31,17 +31,37 @@
                     <textarea id="chunk-query" class="form-control form-control-sm" rows="3"
                               placeholder="Enter your query..."></textarea>
                 </div>
+
+                <div class="mb-3">
+                    <label class="form-label small">Time Range (seconds)</label>
+                    <div class="row g-2">
+                        <div class="col-6">
+                            <input type="number" id="temporal-start-time" class="form-control form-control-sm" 
+                                   placeholder="Start time" min="0" step="0.1">
+                        </div>
+                        <div class="col-6">
+                            <input type="number" id="temporal-end-time" class="form-control form-control-sm" 
+                                   placeholder="End time" min="0" step="0.1">
+                        </div>
+                    </div>
+                </div>
                 
                 <!-- Video Preview -->
                 <div id="analysis-video-preview" class="video-container mb-3 hidden" style="height: 140px;">
                     <video id="analysis-preview-player" class="video-player" controls></video>
                 </div>
+                <input type="hidden" id="current-video-file" value="">
                 
                 <textarea id="chunk-data" style="display: none;"></textarea>
                 
-                <button id="analyze-chunks-btn" class="btn btn-primary btn-sm w-100" disabled>
+                <button id="analyze-chunks-btn" class="btn btn-primary btn-sm w-100 mb-2" disabled>
                     <i class="bi bi-search me-1"></i>
-                    Analyze
+                    Analyze Chunks
+                </button>
+                
+                <button id="temporal-analysis-btn" class="btn btn-outline-primary btn-sm w-100" disabled>
+                    <i class="bi bi-clock-history me-1"></i>
+                    Temporal Analysis
                 </button>
             </div>
         </div>
@@ -88,6 +108,13 @@
                     </div>
 
                     <div class="mb-3">
+                        <h6 class="small text-muted mb-1">Chunk Content</h6>
+                        <div id="result-caption" class="p-2 border rounded small">
+                            <!-- Chunk caption content -->
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
                         <h6 class="small text-muted mb-1">AI Analysis</h6>
                         <div id="result-analysis" class="p-2 border rounded small">
                             <!-- Analysis content -->
@@ -95,9 +122,66 @@
                     </div>
 
                     <div>
-                        <h6 class="small text-muted mb-1">Video Segment</h6>
-                        <div id="result-segment" class="video-container" style="height: 200px;">
-                            <!-- Video segment -->
+                        <h6 class="small text-muted mb-1">Video Controls</h6>
+                        <div class="d-flex gap-2">
+                            <button id="play-segment-btn" class="btn btn-primary btn-sm">
+                                <i class="bi bi-play-fill me-1"></i>
+                                Play Segment
+                            </button>
+                            <span class="small text-muted align-self-center">
+                                <span id="segment-time-range">--:-- to --:--</span>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Temporal Analysis Results -->
+                <div id="temporal-analysis-results" class="hidden">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h6 class="mb-0">Temporal Analysis Results</h6>
+                        <span class="badge bg-info">
+                            <span id="temporal-time-range">--:-- to --:--</span>
+                        </span>
+                    </div>
+                    
+                    <div class="row g-2 mb-3">
+                        <div class="col-4">
+                            <div class="p-2 bg-light rounded text-center">
+                                <div class="small text-muted">Duration</div>
+                                <div class="fw-medium" id="temporal-duration">-</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="p-2 bg-light rounded text-center">
+                                <div class="small text-muted">Frames</div>
+                                <div class="fw-medium" id="temporal-frames">-</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="p-2 bg-light rounded text-center">
+                                <div class="small text-muted">Events</div>
+                                <div class="fw-medium" id="temporal-events">-</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <h6 class="small text-muted mb-1">Analysis</h6>
+                        <div id="temporal-analysis-content" class="p-2 border rounded small">
+                            <!-- Temporal analysis content -->
+                        </div>
+                    </div>
+
+                    <div>
+                        <h6 class="small text-muted mb-1">Video Controls</h6>
+                        <div class="d-flex gap-2">
+                            <button id="play-temporal-btn" class="btn btn-info btn-sm">
+                                <i class="bi bi-play-fill me-1"></i>
+                                Play Segment
+                            </button>
+                            <span class="small text-muted align-self-center">
+                                <span id="temporal-segment-info">Ready to play</span>
+                            </span>
                         </div>
                     </div>
                 </div>

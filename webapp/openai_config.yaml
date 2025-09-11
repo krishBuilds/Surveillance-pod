@@ -1,0 +1,6 @@
+openai:
+  api_key: "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"
+  model: "gpt-4o-mini"
+  max_tokens: 150
+  temperature: 0.3
+  timeout: 30
