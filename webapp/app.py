@@ -25,6 +25,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from main_enhanced import EnhancedModelManager
 # Import simple caption storage
 from simple_caption_storage import SimpleCaptionStorage
+# Import model client for persistent model connection
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from model_server import ModelClient
 
 # Import helper modules
 from helpers import (
@@ -76,6 +80,14 @@ DEFAULT_VIDEO = "inputs/videos/bigbuckbunny.mp4"
 # Global enhanced manager instance
 enhanced_manager = None
 
+# Model server configuration
+MODEL_SERVER_HOST = os.environ.get('MODEL_SERVER_HOST', 'localhost')
+MODEL_SERVER_PORT = int(os.environ.get('MODEL_SERVER_PORT', '8188'))
+USE_MODEL_SERVER = os.environ.get('USE_MODEL_SERVER', 'true').lower() == 'true'
+
+# Global model client instance
+model_client = None
+
 # Global caption storage instance
 caption_db = None
 
@@ -120,6 +132,61 @@ def get_openai_client():
             openai_client = None
             openai_config = None
     return openai_client
+
+def get_model_client():
+    """Get or create the model client with connection management"""
+    global model_client
+    if model_client is None and USE_MODEL_SERVER:
+        logger.info("=== INITIALIZING MODEL CLIENT ===")
+        logger.info(f"Connecting to model server at {MODEL_SERVER_HOST}:{MODEL_SERVER_PORT}")
+        
+        try:
+            model_client = ModelClient(host=MODEL_SERVER_HOST, port=MODEL_SERVER_PORT)
+            
+            # Test connection
+            logger.info("Testing model server connection...")
+            ping_result = model_client.ping()
+            
+            if ping_result and ping_result.get('status') == 'ok':
+                logger.info("SUCCESS: Connected to model server")
+                logger.info("=== MODEL CLIENT READY ===")
+                return model_client
+            else:
+                logger.error(f"FAILED to connect to model server: {ping_result}")
+                model_client = None
+                return None
+                
+        except Exception as e:
+            logger.error(f"EXCEPTION during client initialization: {str(e)}", exc_info=True)
+            model_client = None
+            return None
+    
+    return model_client
+
+def check_model_server():
+    """Check if model server is available and reconnect if needed"""
+    global model_client
+    
+    if not USE_MODEL_SERVER:
+        return None
+    
+    if model_client is None:
+        return get_model_client()
+    
+    try:
+        # Test connection
+        ping_result = model_client.ping()
+        if not ping_result or ping_result.get('status') != 'ok':
+            logger.warning("Model server connection lost, attempting to reconnect...")
+            model_client = None
+            return get_model_client()
+            
+        return model_client
+        
+    except Exception as e:
+        logger.error(f"Model server check failed: {str(e)}")
+        model_client = None
+        return get_model_client()
 
 def get_enhanced_manager():
     """Get or create the enhanced model manager with memory cleanup"""
@@ -182,6 +249,35 @@ def get_enhanced_manager():
     
     return enhanced_manager
 
+def auto_detect_model_server():
+    """Auto-detect if model server is running and update USE_MODEL_SERVER accordingly"""
+    global USE_MODEL_SERVER
+    
+    # If USE_MODEL_SERVER is explicitly set to true/false, don't auto-detect
+    env_use_server = os.environ.get('USE_MODEL_SERVER', '').lower()
+    if env_use_server in ['true', 'false']:
+        logger.info(f"USE_MODEL_SERVER explicitly set to: {env_use_server}")
+        return
+    
+    # Auto-detect mode - check if model server is running
+    logger.info("🔍 Auto-detecting model server...")
+    try:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)  # 2 second timeout
+        result = sock.connect_ex((MODEL_SERVER_HOST, MODEL_SERVER_PORT))
+        sock.close()
+        
+        if result == 0:
+            USE_MODEL_SERVER = True
+            logger.info(f"✅ Model server detected at {MODEL_SERVER_HOST}:{MODEL_SERVER_PORT} - using server mode")
+        else:
+            USE_MODEL_SERVER = False
+            logger.info("❌ No model server detected - using local mode")
+    except Exception as e:
+        USE_MODEL_SERVER = False
+        logger.info(f"❌ Model server detection failed: {str(e)} - using local mode")
+
 def startup_cleanup():
     """Clean up memory and cache on app startup while keeping model loaded"""
     logger.info("=== WEBAPP STARTUP CLEANUP ===")
@@ -190,17 +286,28 @@ def startup_cleanup():
         logger.info("🔧 Development startup - optimizing for persistence")
     
     try:
+        # Auto-detect model server if in auto mode
+        auto_detect_model_server()
+        
         # Clear any existing CUDA cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             logger.info("CUDA cache cleared")
         
-        # Initialize manager and clean cache
-        manager = get_enhanced_manager()
-        if manager:
-            logger.info("Startup cleanup completed successfully")
+        if USE_MODEL_SERVER:
+            # Initialize model client
+            client = get_model_client()
+            if client:
+                logger.info("Model client connection established")
+            else:
+                logger.warning("Failed to connect to model server - webapp will work but model functions may fail")
         else:
-            logger.error("Manager initialization failed during startup")
+            # Initialize manager and clean cache (original behavior)
+            manager = get_enhanced_manager()
+            if manager:
+                logger.info("Startup cleanup completed successfully")
+            else:
+                logger.error("Manager initialization failed during startup")
             
     except Exception as e:
         logger.error(f"Startup cleanup error: {str(e)}")
@@ -370,6 +477,63 @@ def generate_caption_stream():
     
     return Response(generate_caption_updates(), mimetype='text/event-stream')
 
+@app.route('/api/model-status')
+def get_model_status():
+    """Get model server status"""
+    try:
+        if USE_MODEL_SERVER:
+            client = check_model_server()
+            if client:
+                model_info = client.get_model_info()
+                if model_info and model_info.get('model_loaded'):
+                    return jsonify({
+                        'status': 'connected',
+                        'model_loaded': True,
+                        'device': model_info.get('device'),
+                        'precision': model_info.get('precision'),
+                        'max_frames': model_info.get('max_frames'),
+                        'mode': 'server'
+                    })
+                else:
+                    return jsonify({
+                        'status': 'connected',
+                        'model_loaded': False,
+                        'error': 'Model not loaded on server',
+                        'mode': 'server'
+                    })
+            else:
+                return jsonify({
+                    'status': 'disconnected',
+                    'model_loaded': False,
+                    'error': 'Cannot connect to model server',
+                    'mode': 'server'
+                })
+        else:
+            manager = get_enhanced_manager()
+            if manager and manager.model_manager.model:
+                return jsonify({
+                    'status': 'loaded',
+                    'model_loaded': True,
+                    'device': str(manager.model_manager.device),
+                    'precision': manager.model_manager.precision,
+                    'max_frames': manager.model_manager.get_optimal_frame_count(),
+                    'mode': 'local'
+                })
+            else:
+                return jsonify({
+                    'status': 'not_loaded',
+                    'model_loaded': False,
+                    'error': 'Local model not initialized',
+                    'mode': 'local'
+                })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'model_loaded': False,
+            'error': str(e),
+            'mode': USE_MODEL_SERVER and 'server' or 'local'
+        })
+
 @app.route('/generate-caption', methods=['POST'])
 def generate_caption():
     """Generate detailed caption for entire video using FPS-based sampling and chunks with real-time updates"""
@@ -378,10 +542,19 @@ def generate_caption():
     try:
         logger.info(f"[{request_id}] === CAPTION GENERATION REQUEST START ===")
         
-        manager = get_enhanced_manager()
-        if not manager:
-            logger.error(f"[{request_id}] FAILED: Model manager not initialized")
-            return jsonify({'error': 'Model manager not initialized'}), 500
+        # Check model availability
+        if USE_MODEL_SERVER:
+            client = check_model_server()
+            if not client:
+                logger.error(f"[{request_id}] FAILED: Model server not available")
+                return jsonify({'error': 'Model server not available'}), 500
+            model_source = "server"
+        else:
+            manager = get_enhanced_manager()
+            if not manager:
+                logger.error(f"[{request_id}] FAILED: Model manager not initialized")
+                return jsonify({'error': 'Model manager not initialized'}), 500
+            model_source = "local"
             
         data = request.get_json()
         logger.info(f"[{request_id}] Caption request data: {json.dumps(data, indent=2)}")
@@ -432,8 +605,19 @@ def generate_caption():
             logger.info(f"[{request_id}] Starting temporal analysis-based caption generation...")
             
             # Get video duration to determine segment processing
-            video_info = manager.model_manager.get_video_info(video_path)
-            video_duration = video_info.get('duration', 0)
+            if USE_MODEL_SERVER:
+                import cv2
+                cap = cv2.VideoCapture(video_path)
+                if cap.isOpened():
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    video_duration = frame_count / fps if fps > 0 else 0
+                    cap.release()
+                else:
+                    video_duration = 0
+            else:
+                video_info = manager.model_manager.get_video_info(video_path)
+                video_duration = video_info.get('duration', 0)
             
             # Create simple, natural prompt for video description
             temporal_prompt = f"""Describe what happens in this {video_duration:.1f} second video in a natural, flowing narrative style.
@@ -443,20 +627,31 @@ Write a clear, engaging description that tells the story of what unfolds through
 Keep the description conversational and easy to read, as if you're telling someone what you saw in the video."""
 
             # Process entire video with temporal analysis
-            caption_result = process_temporal_video_segment(
-                manager.model_manager,
-                video_path=video_path,
-                prompt=temporal_prompt,
-                num_frames=min(160, int(fps_sampling * video_duration)),  # Cap at 160 frames for memory
-                start_time=0,
-                end_time=video_duration,
-                fps_sampling=fps_sampling
-            )
+            if USE_MODEL_SERVER:
+                caption_result = client.process_video(
+                    video_path=video_path,
+                    prompt=temporal_prompt,
+                    num_frames=min(160, int(fps_sampling * video_duration)),
+                    fps_sampling=fps_sampling
+                )
+            else:
+                caption_result = process_temporal_video_segment(
+                    manager.model_manager,
+                    video_path=video_path,
+                    prompt=temporal_prompt,
+                    num_frames=min(160, int(fps_sampling * video_duration)),  # Cap at 160 frames for memory
+                    start_time=0,
+                    end_time=video_duration,
+                    fps_sampling=fps_sampling
+                )
             
             processing_time = time.time() - start_time
             
-            if caption_result and caption_result.get('success') and caption_result.get('response'):
-                temporal_caption = caption_result['response']
+            if caption_result and caption_result.get('success'):
+                if USE_MODEL_SERVER:
+                    temporal_caption = caption_result.get('response', '')
+                else:
+                    temporal_caption = caption_result.get('response', '')
                 
                 # Format the caption based on output format preference
                 if output_format == 'paragraph':
@@ -475,7 +670,7 @@ Keep the description conversational and easy to read, as if you're telling someo
                     'chunk_size': chunk_size,
                     'processing_mode': 'temporal_analysis',
                     'output_format': output_format,
-                    'frames_processed': caption_result.get('frames_processed', min(160, int(fps_sampling * video_duration))),
+                    'frames_processed': caption_result.get('num_frames' if USE_MODEL_SERVER else 'frames_processed', min(160, int(fps_sampling * video_duration))),
                     'chunks_processed': 1,  # Single temporal analysis pass
                     'processing_time': f"{processing_time:.2f}s",
                     'timestamp': datetime.now().isoformat(),
@@ -485,10 +680,10 @@ Keep the description conversational and easy to read, as if you're telling someo
                         'start_time': 0,
                         'end_time': video_duration,
                         'caption': formatted_caption,
-                        'frames_processed': caption_result.get('frames_processed', min(160, int(fps_sampling * video_duration))),
+                        'frames_processed': caption_result.get('num_frames' if USE_MODEL_SERVER else 'frames_processed', min(160, int(fps_sampling * video_duration))),
                         'processing_time': f"{processing_time:.2f}s"
                     }],
-                    'analysis_method': 'InternVideo2.5 Temporal Analysis'
+                    'analysis_method': f'InternVideo2.5 Temporal Analysis ({model_source})'
                 }
                 
                 # Automatically store caption in database

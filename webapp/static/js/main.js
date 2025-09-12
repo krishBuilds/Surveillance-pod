@@ -495,10 +495,24 @@ class SurveillanceApp {
             const result = await response.json();
             const processingTime = analysisTimer.end();
             
+            // Debug: Log the response structure
+            console.log('Temporal analysis response:', result);
+            console.log('Response keys:', Object.keys(result));
+            console.log('Success:', result.success);
+            console.log('Has temporal_analysis:', 'temporal_analysis' in result);
+            console.log('Has key_events:', 'key_events' in result);
+            
             if (result.success) {
+                // Debug: Check if elements exist
+                console.log('Loading div:', loadingDiv);
+                console.log('Results div:', resultsDiv);
+                
                 // Hide loading and show results
                 if (loadingDiv) loadingDiv.style.display = 'none';
-                if (resultsDiv) resultsDiv.style.display = 'block';
+                if (resultsDiv) {
+                    resultsDiv.style.display = 'block';
+                    resultsDiv.classList.remove('hidden');  // Remove hidden class that overrides display
+                }
                 
                 const duration = endTime - startTime;
                 
@@ -513,10 +527,32 @@ class SurveillanceApp {
                 
                 Object.entries(elements).forEach(([id, value]) => {
                     const element = document.getElementById(id);
+                    console.log(`Updating element ${id}:`, element, 'with value:', value);
                     if (element) {
                         element.textContent = value;
+                    } else {
+                        console.warn(`Element with id '${id}' not found`);
                     }
                 });
+                
+                // Display key events if available
+                const keyEventsDiv = document.getElementById('temporal-key-events');
+                if (keyEventsDiv && result.key_events && result.key_events.length > 0) {
+                    keyEventsDiv.innerHTML = `
+                        <h4>Key Events Timeline:</h4>
+                        <ul class="key-events-list">
+                            ${result.key_events.map(event => `
+                                <li>
+                                    <strong>${event.timestamp ? this.formatTime(event.timestamp) : 'Unknown time'}:</strong>
+                                    ${event.description || 'No description'}
+                                </li>
+                            `).join('')}
+                        </ul>
+                    `;
+                    keyEventsDiv.style.display = 'block';
+                } else if (keyEventsDiv) {
+                    keyEventsDiv.style.display = 'none';
+                }
                 
                 // Setup play temporal segment button
                 const playTemporalBtn = document.getElementById('play-temporal-btn');

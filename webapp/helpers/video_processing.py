@@ -33,7 +33,7 @@ def process_video_segment(model_manager, video_path: str, prompt: str, num_frame
     
     try:
         # Process video segment directly using the model manager with temporal bounds
-        result = model_manager.process_video(
+        result = model_manager.model_manager.process_video(
             video_path=video_path,
             prompt=prompt,
             num_frames=num_frames,

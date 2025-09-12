@@ -82,6 +82,8 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
             # Send chunk start status
             yield {
                 'type': 'chunk_start',
+                'chunk': i + 1,
+                'total_chunks': total_chunks,
                 'chunk_id': chunk['chunk_id'],
                 'start_time': chunk['start_time'],
                 'end_time': chunk['end_time'],
@@ -116,9 +118,13 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
                 # Send chunk completion
                 yield {
                     'type': 'chunk_complete',
+                    'chunk': i + 1,
+                    'total_chunks': total_chunks,
                     'chunk_id': chunk['chunk_id'],
                     'caption': caption,
                     'processing_time': chunk_processing_time,
+                    'progress': ((i + 1) / total_chunks) * 100,
+                    'characters': len(caption),
                     'message': f'Completed chunk {i+1}/{total_chunks}',
                     'request_id': request_id
                 }
@@ -126,6 +132,8 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
                 error_msg = result.get('error', 'Unknown error')
                 yield {
                     'type': 'chunk_error',
+                    'chunk': i + 1,
+                    'total_chunks': total_chunks,
                     'chunk_id': chunk['chunk_id'],
                     'error': error_msg,
                     'message': f'Error in chunk {i+1}/{total_chunks}: {error_msg}',
@@ -154,6 +162,7 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
                 'caption': final_caption,
                 'total_chunks': total_chunks,
                 'processed_chunks': len(all_captions),
+                'chunks_processed': len(all_captions),
                 'total_processing_time': total_processing_time,
                 'avg_processing_time': avg_processing_time,
                 'video_file': video_file,
@@ -175,6 +184,32 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
             'message': f'Processing error: {str(e)}',
             'request_id': request_id
         }
+    
+    finally:
+        # Final cleanup - always run this regardless of success/failure
+        try:
+            logger.info(f"[{request_id}] Performing final cleanup of streaming processing...")
+            
+            # Clear preprocessed data from enhanced manager
+            if hasattr(manager, '_clear_preprocessed_data'):
+                manager._clear_preprocessed_data()
+                logger.info(f"[{request_id}] Enhanced manager preprocessed data cleared")
+            
+            # Clear processing cache from model manager
+            if hasattr(manager, 'model_manager') and hasattr(manager.model_manager, 'clear_processing_cache'):
+                manager.model_manager.clear_processing_cache()
+                logger.info(f"[{request_id}] Model manager processing cache cleared")
+            
+            # Clear CUDA cache if available
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info(f"[{request_id}] CUDA cache cleared")
+            
+            logger.info(f"[{request_id}] Final cleanup completed successfully")
+            
+        except Exception as cleanup_error:
+            logger.warning(f"[{request_id}] Cleanup error: {str(cleanup_error)}")
 
 def process_video_for_caption_optimized(manager, video_path: str, video_file: str,
                                        fps_sampling: float, chunk_size: int, prompt: str,
