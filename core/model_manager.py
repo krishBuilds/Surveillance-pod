@@ -458,9 +458,27 @@ class ModelManager:
             logger.info(f"AI Response length: {len(output)} characters")
             logger.info(f"AI Response preview: {output[:100]}...")
             
+            # Clean up GPU memory and processing data after successful video processing
+            try:
+                self._clear_preprocessed_data()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                logger.info("Video processing cleanup completed successfully")
+            except Exception as cleanup_error:
+                logger.warning(f"Video processing cleanup warning: {str(cleanup_error)}")
+            
         except Exception as e:
             logger.error(f"Error processing video: {str(e)}")
             result["error"] = str(e)
+            
+            # Clean up GPU memory and processing data after error
+            try:
+                self._clear_preprocessed_data()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                logger.info("Video processing error cleanup completed")
+            except Exception as cleanup_error:
+                logger.warning(f"Video processing error cleanup warning: {str(cleanup_error)}")
         
         return result
     
@@ -856,13 +874,20 @@ class ModelManager:
             try:
                 img = Image.fromarray(vr[frame_index].asnumpy()).convert("RGB")
                 processed_img = self._dynamic_preprocess(
-                    img, image_size=input_size, use_thumbnail=True, max_num=max_num
+                    img, image_size=input_size, use_thumbnail=False, max_num=max_num
                 )
                 
                 # Add validation for processed image
                 if not processed_img or len(processed_img) == 0:
                     logger.error(f"Dynamic preprocess returned empty result for frame {frame_index}")
                     continue
+                
+                # Ensure we don't exceed max_num (dynamic_preprocess might return more than expected)
+                if len(processed_img) > max_num:
+                    processed_img = processed_img[:max_num]
+                    logger.warning(f"Truncated processed_img to {max_num} tiles for frame {frame_index}")
+                
+                logger.debug(f"Frame {frame_index}: {len(processed_img)} tiles processed")
                 
                 # Transform each tile with error handling
                 transformed_tiles = []
@@ -904,6 +929,49 @@ class ModelManager:
         
         if not num_patches_list:
             raise RuntimeError("No patches were generated - frame processing failed")
+        
+        # Check if all tensors have the same shape before concatenation
+        first_shape = pixel_values_list[0].shape
+        logger.info(f"First tensor shape: {first_shape}")
+        
+        inconsistent_shapes = []
+        for i, tensor in enumerate(pixel_values_list):
+            if tensor.shape != first_shape:
+                inconsistent_shapes.append((i, tensor.shape))
+        
+        if inconsistent_shapes:
+            logger.error(f"Inconsistent tensor shapes found:")
+            for idx, shape in inconsistent_shapes:
+                logger.error(f"  Frame {idx}: {shape} (expected: {first_shape})")
+            
+            # Try to fix by padding or truncating to the most common shape
+            shape_counts = {}
+            for tensor in pixel_values_list:
+                shape = tensor.shape
+                shape_counts[shape] = shape_counts.get(shape, 0) + 1
+            
+            most_common_shape = max(shape_counts, key=shape_counts.get)
+            logger.info(f"Using most common shape: {most_common_shape}")
+            
+            # Pad or truncate tensors to match the most common shape
+            fixed_pixel_values_list = []
+            for i, tensor in enumerate(pixel_values_list):
+                if tensor.shape == most_common_shape:
+                    fixed_pixel_values_list.append(tensor)
+                else:
+                    # Pad with zeros if needed
+                    if tensor.shape[0] < most_common_shape[0]:
+                        padding = torch.zeros(most_common_shape[0] - tensor.shape[0], *tensor.shape[1:])
+                        tensor = torch.cat([tensor, padding], dim=0)
+                    else:
+                        # Truncate if needed
+                        tensor = tensor[:most_common_shape[0]]
+                    fixed_pixel_values_list.append(tensor)
+                    logger.info(f"Fixed frame {i} shape from {pixel_values_list[i].shape} to {tensor.shape}")
+            
+            pixel_values_list = fixed_pixel_values_list
+            # Update num_patches_list to match fixed shapes
+            num_patches_list = [tensor.shape[0] for tensor in pixel_values_list]
         
         pixel_values = torch.cat(pixel_values_list)
         logger.info(f"Successfully processed {len(pixel_values_list)} frames with {len(num_patches_list)} patches")

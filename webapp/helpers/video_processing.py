@@ -32,33 +32,14 @@ def process_video_segment(model_manager, video_path: str, prompt: str, num_frame
     logger.info(f"Processing video segment: {start_time:.1f}s-{end_time:.1f}s ({num_frames} frames)")
     
     try:
-        # Get video info first
-        video_info = model_manager._get_video_info(video_path)
-        video_fps = video_info.get('fps', 30.0)
-        
-        # Use the enhanced manager's preprocess method with proper temporal bounds
-        success = model_manager.preprocess_video(
-            video_path=video_path,
-            num_frames=num_frames,
-            fps_sampling=fps_sampling,
-            time_bound=end_time - start_time,
-            start_offset=start_time
-        )
-        
-        if not success:
-            logger.error(f"Failed to preprocess video segment: {start_time:.1f}s-{end_time:.1f}s")
-            return {
-                'success': False,
-                'error': 'Video preprocessing failed',
-                'start_time': start_time,
-                'end_time': end_time
-            }
-        
-        # Process the preprocessed video with the model
-        result = model_manager.model_manager.process_video(
+        # Process video segment directly using the model manager with temporal bounds
+        result = model_manager.process_video(
             video_path=video_path,
             prompt=prompt,
-            num_frames=num_frames
+            num_frames=num_frames,
+            fps_sampling=fps_sampling,
+            start_time=start_time,
+            end_time=end_time
         )
         
         if result and result.get('success'):
@@ -74,13 +55,13 @@ def process_video_segment(model_manager, video_path: str, prompt: str, num_frame
             
             return {
                 'success': True,
+                'response': caption,  # Include response field for consistency
                 'caption': caption,
                 'start_time': start_time,
                 'end_time': end_time,
                 'num_frames': num_frames,
                 'fps_sampling': fps_sampling,
                 'frame_timestamps': frame_timestamps,
-                'video_fps': video_fps,
                 'processing_time': result.get('processing_time', 0),
                 'actual_duration': end_time - start_time
             }

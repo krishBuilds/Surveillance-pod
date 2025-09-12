@@ -38,8 +38,14 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
     try:
         # Get video info
         video_info = manager._get_video_info(video_path)
-        duration = video_info.get('duration', 0)
-        total_frames = video_info.get('total_frames', 0)
+        duration = video_info.get('duration_seconds', video_info.get('duration', 0))
+        # Handle case where duration might be a string
+        if isinstance(duration, str):
+            try:
+                duration = float(duration.replace('s', ''))
+            except (ValueError, AttributeError):
+                duration = 0
+        total_frames = video_info.get('frames', 0)
         
         if duration == 0:
             yield {
@@ -51,6 +57,7 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
         
         # Calculate chunks
         from .video_processing import calculate_video_chunks
+        logger.info(f"[{request_id}] Duration type: {type(duration)}, value: {duration}")
         chunks = calculate_video_chunks(duration, chunk_size, processing_mode)
         
         total_chunks = len(chunks)

@@ -506,9 +506,9 @@ class SurveillanceApp {
                 const elements = {
                     'temporal-time-range': `${this.formatTime(startTime)} to ${this.formatTime(endTime)}`,
                     'temporal-duration': `${duration.toFixed(1)}s`,
-                    'temporal-frames': result.frames_analyzed || '-',
-                    'temporal-events': result.events_detected || '-',
-                    'temporal-analysis-content': result.analysis || 'No analysis available'
+                    'temporal-frames': result.frames_analyzed || result.num_frames || '-',
+                    'temporal-events': result.key_events ? result.key_events.length : (result.events_detected || '-'),
+                    'temporal-analysis-content': result.temporal_analysis || result.analysis || 'No analysis available'
                 };
                 
                 Object.entries(elements).forEach(([id, value]) => {
