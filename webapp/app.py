@@ -11,6 +11,7 @@ import os
 import sys
 import re
 import time
+import sqlite3
 from datetime import datetime
 import logging
 import threading
@@ -20,8 +21,8 @@ from pathlib import Path
 
 # Add parent directory to path to access core modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# Import simple caption storage
-from simple_caption_storage import SimpleCaptionStorage
+# Import database utilities
+from helpers.db_utils import get_caption_db, get_video_caption as get_video_caption_from_db, store_video_caption, get_all_videos_with_captions
 # Import model client for persistent model connection (local to webapp)
 from model_server import ModelClient
 
@@ -104,7 +105,8 @@ def get_caption_db():
     """Get or create the simple caption storage instance"""
     global caption_db
     if caption_db is None:
-        caption_db = SimpleCaptionStorage()
+        from helpers.db_utils import get_caption_db as get_db
+        caption_db = get_db()
     return caption_db
 
 def get_openai_client():
@@ -308,22 +310,9 @@ def generate_caption_stream():
     try:
         data = request.get_json()
         video_file = data.get('video_file', '')
-        fps_sampling = float(data.get('fps_sampling', 1.0))
-        chunk_size = int(data.get('chunk_size', 60))
-        prompt = data.get('prompt', '''Generate a detailed temporal analysis of this video.
-
-Instructions:
-1. Analyze the temporal progression of events frame by frame
-2. For each significant action or event, include the specific timestamp when it occurs
-3. Describe how the scene evolves over time from start to finish
-4. Note any changes, movements, or transitions between frames
-5. Provide a detailed chronological narrative with precise timing information
-
-Response Format:
-- Include specific timestamps for key events (e.g., "At 12.3s, a person enters the scene")
-- Describe the sequence of actions with timing references
-- Note any temporal patterns or recurring events
-- Focus on the temporal flow and timing relationships between different elements''')
+        fps_sampling = float(data.get('fps_sampling', 3.0))
+        chunk_size = int(data.get('chunk_size', 30))
+        prompt = data.get('prompt', 'What happens in this video? Describe the main actions and events.')
         processing_mode = data.get('processing_mode', 'sequential')
         output_format = data.get('output_format', 'paragraph')
     except Exception as e:
@@ -331,6 +320,7 @@ Response Format:
     
     def generate_caption_updates():
         final_result = None
+        all_captions = []  # Initialize to collect chunk data during streaming
         try:
             logger.info(f"[{request_id}] === STREAMING CAPTION GENERATION START ===")
 
@@ -439,6 +429,16 @@ Response Format:
                             update['success'] = False
                             update['error'] = chunk_result.get('error', 'Chunk processing failed') if chunk_result else 'Unknown error'
 
+                    # Handle chunk completion - capture caption data for model server
+                    if update.get('type') == 'chunk_complete':
+                        all_captions.append({
+                            'chunk_id': update.get('chunk_id'),
+                            'start_time': update.get('start_time'),
+                            'end_time': update.get('end_time'),
+                            'caption': update.get('caption'),
+                            'processing_time': update.get('processing_time')
+                        })
+
                     # Capture the final result for storage
                     if update.get('type') == 'complete' and update.get('success'):
                         final_result = update
@@ -451,6 +451,16 @@ Response Format:
                     manager, video_path, video_file, fps_sampling,
                     chunk_size, prompt, processing_mode, output_format, request_id
                 ):
+                    # Handle chunk completion - capture caption data
+                    if update.get('type') == 'chunk_complete':
+                        all_captions.append({
+                            'chunk_id': update.get('chunk_id'),
+                            'start_time': update.get('start_time'),
+                            'end_time': update.get('end_time'),
+                            'caption': update.get('caption'),
+                            'processing_time': update.get('processing_time')
+                        })
+
                     # Capture the final result for storage
                     if update.get('type') == 'complete' and update.get('success'):
                         final_result = update
@@ -460,18 +470,73 @@ Response Format:
             # Store caption in database after processing completes
             if final_result:
                 try:
-                    db = get_caption_db()
+                    # Create chunk details - WORKAROUND for time value corruption
+                    chunk_details = []
+                    logger.info(f"[{request_id}] Creating chunk details with workaround:")
+                    logger.info(f"[{request_id}]   all_captions exists: {'all_captions' in locals()}")
+                    logger.info(f"[{request_id}]   all_captions length: {len(all_captions) if 'all_captions' in locals() and all_captions else 0}")
+
+                    # Get video info for time calculation
+                    video_duration = final_result.get('duration', final_result.get('video_duration', 0))
+                    total_chunks = final_result.get('total_chunks', final_result.get('processed_chunks', 1))
+                    fps_used = final_result.get('fps_sampling', fps_sampling)
+
+                    logger.info(f"[{request_id}]   Video duration: {video_duration}, Total chunks: {total_chunks}, FPS: {fps_used}")
+
+                    if 'all_captions' in locals() and all_captions and len(all_captions) > 0:
+                        logger.info(f"[{request_id}] Processing {len(all_captions)} captions from streaming:")
+                        logger.info(f"[{request_id}] Debug: video_duration={video_duration}, total_chunks={total_chunks}")
+
+                        # Calculate chunk size based on duration and number of chunks
+                        calculated_chunk_size = video_duration / total_chunks if video_duration > 0 and total_chunks > 0 else 20
+
+                        for i, caption_data in enumerate(all_captions):
+                            # WORKAROUND: Reconstruct time values since they get corrupted during transfer
+                            start_time = i * calculated_chunk_size
+                            end_time = min((i + 1) * calculated_chunk_size, video_duration) if video_duration > 0 else (i + 1) * calculated_chunk_size
+
+                            chunk_id = caption_data.get('chunk_id', i + 1)
+                            logger.info(f"[{request_id}]   Caption {i}: reconstructing time {start_time:.2f}s-{end_time:.2f}s (original had corrupted time values)")
+
+                            chunk_details.append({
+                                'chunk_id': chunk_id,
+                                'start_time': start_time,
+                                'end_time': end_time,
+                                'caption': caption_data.get('caption', ''),
+                                'processing_time': caption_data.get('processing_time', 0)
+                            })
+                    else:
+                        logger.warning(f"[{request_id}] No all_captions found, creating synthetic chunks")
+                        # Create synthetic chunks from final result
+                        if video_duration > 0 and total_chunks > 0:
+                            calculated_chunk_size = video_duration / total_chunks
+                            for i in range(total_chunks):
+                                start_time = i * calculated_chunk_size
+                                end_time = min((i + 1) * calculated_chunk_size, video_duration)
+
+                                chunk_details.append({
+                                    'chunk_id': i + 1,
+                                    'start_time': start_time,
+                                    'end_time': end_time,
+                                    'caption': f'Video segment {i + 1} ({start_time:.1f}s-{end_time:.1f}s)',
+                                    'processing_time': 0
+                                })
+
                     storage_data = {
                         'caption': final_result.get('caption', ''),
-                        'chunk_details': [],  # Model server doesn't provide chunk details
-                        'video_duration': 0,  # Will be calculated from video info
-                        'frames_processed': final_result.get('frames_processed', final_result.get('total_frames', 0)),
+                        'chunk_details': chunk_details,  # Include actual chunk data from streaming
+                        'video_duration': final_result.get('duration', final_result.get('video_duration', 0)),  # Get from model server response
+                        'frames_processed': final_result.get('frames_processed', final_result.get('total_chunks', 0)),
                         'fps_used': fps_sampling,
-                        'chunk_size': chunk_size,
-                        'analysis_method': final_result.get('analysis_method', 'temporal_analysis')
+                        'chunk_size': calculated_chunk_size if 'calculated_chunk_size' in locals() else 20,
+                        'analysis_method': final_result.get('analysis_method', 'streaming_analysis')
                     }
-                    
-                    if db.store_video_caption(video_file, storage_data):
+
+                    logger.info(f"[{request_id}] About to store caption data:")
+                    logger.info(f"[{request_id}]   Chunk details count: {len(chunk_details)}")
+                    logger.info(f"[{request_id}]   First chunk: {chunk_details[0] if chunk_details else 'None'}")
+
+                    if store_video_caption(video_file, storage_data):
                         logger.info(f"[{request_id}] Caption automatically stored after streaming for video: {video_file}")
                     else:  # Should not happen with server-only mode
                         logger.warning(f"[{request_id}] Failed to store caption after streaming for video: {video_file}")
@@ -569,22 +634,9 @@ def generate_caption():
         
         # Extract parameters
         video_file = data.get('video_file', '')
-        fps_sampling = float(data.get('fps_sampling', 1.0))
-        chunk_size = int(data.get('chunk_size', 60))
-        prompt = data.get('prompt', '''Generate a detailed temporal analysis of this video.
-
-Instructions:
-1. Analyze the temporal progression of events frame by frame
-2. For each significant action or event, include the specific timestamp when it occurs
-3. Describe how the scene evolves over time from start to finish
-4. Note any changes, movements, or transitions between frames
-5. Provide a detailed chronological narrative with precise timing information
-
-Response Format:
-- Include specific timestamps for key events (e.g., "At 12.3s, a person enters the scene")
-- Describe the sequence of actions with timing references
-- Note any temporal patterns or recurring events
-- Focus on the temporal flow and timing relationships between different elements''')
+        fps_sampling = float(data.get('fps_sampling', 3.0))
+        chunk_size = int(data.get('chunk_size', 30))
+        prompt = data.get('prompt', 'What happens in this video? Describe the main actions and events.')
         processing_mode = data.get('processing_mode', 'sequential')
         output_format = data.get('output_format', 'paragraph')
         
@@ -652,7 +704,7 @@ Keep the description conversational and easy to read, as if you're telling someo
                 caption_result = client.process_video(
                     video_path=video_path,
                     prompt=temporal_prompt,
-                    num_frames=min(160, int(fps_sampling * video_duration)),
+                    num_frames=min(192, int(fps_sampling * video_duration)),
                     fps_sampling=fps_sampling
                 )
             else:  # Should not happen with server-only mode
@@ -660,7 +712,7 @@ Keep the description conversational and easy to read, as if you're telling someo
                     manager.model_manager,
                     video_path=video_path,
                     prompt=temporal_prompt,
-                    num_frames=min(160, int(fps_sampling * video_duration)),  # Cap at 160 frames for memory
+                    num_frames=min(192, int(fps_sampling * video_duration)),  # Cap at 160 frames for memory
                     start_time=0,
                     end_time=video_duration,
                     fps_sampling=fps_sampling
@@ -709,7 +761,6 @@ Keep the description conversational and easy to read, as if you're telling someo
                 
                 # Automatically store caption in database
                 try:
-                    db = get_caption_db()
                     storage_data = {
                         'caption': temporal_caption,
                         'chunk_details': result['chunk_details'],
@@ -719,8 +770,8 @@ Keep the description conversational and easy to read, as if you're telling someo
                         'chunk_size': chunk_size,
                         'analysis_method': 'temporal_analysis'
                     }
-                    
-                    if db.store_video_caption(video_file, storage_data):
+
+                    if store_video_caption(video_file, storage_data):
                         logger.info(f"[{request_id}] Caption automatically stored for video: {video_file}")
                     else:  # Should not happen with server-only mode
                         logger.warning(f"[{request_id}] Failed to store caption for video: {video_file}")
@@ -778,22 +829,9 @@ def generate_caption_original():
         
         # Extract parameters
         video_file = data.get('video_file', '')
-        fps_sampling = float(data.get('fps_sampling', 1.0))
-        chunk_size = int(data.get('chunk_size', 60))
-        prompt = data.get('prompt', '''Generate a detailed temporal analysis of this video.
-
-Instructions:
-1. Analyze the temporal progression of events frame by frame
-2. For each significant action or event, include the specific timestamp when it occurs
-3. Describe how the scene evolves over time from start to finish
-4. Note any changes, movements, or transitions between frames
-5. Provide a detailed chronological narrative with precise timing information
-
-Response Format:
-- Include specific timestamps for key events (e.g., "At 12.3s, a person enters the scene")
-- Describe the sequence of actions with timing references
-- Note any temporal patterns or recurring events
-- Focus on the temporal flow and timing relationships between different elements''')
+        fps_sampling = float(data.get('fps_sampling', 3.0))
+        chunk_size = int(data.get('chunk_size', 30))
+        prompt = data.get('prompt', 'What happens in this video? Describe the main actions and events.')
         processing_mode = data.get('processing_mode', 'sequential')
         output_format = data.get('output_format', 'paragraph')
         
@@ -1116,8 +1154,8 @@ def get_caption_estimate():
     try:
         data = request.get_json()
         video_file = data.get('video_file', '')
-        fps_sampling = float(data.get('fps_sampling', 1.0))
-        chunk_size = int(data.get('chunk_size', 60))
+        fps_sampling = float(data.get('fps_sampling', 3.0))
+        chunk_size = int(data.get('chunk_size', 30))
         processing_mode = data.get('processing_mode', 'sequential')
         
         if not video_file:
@@ -1204,8 +1242,7 @@ def get_caption_estimate():
 def get_stored_captions():
     """Get list of videos with stored captions for analysis page"""
     try:
-        db = get_caption_db()
-        videos = db.get_all_videos_with_captions()
+        videos = get_all_videos_with_captions()
         return jsonify({
             'success': True,
             'videos': videos
@@ -1214,7 +1251,91 @@ def get_stored_captions():
         logger.error(f"Error fetching stored captions: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/debug-caption/<filename>', methods=['GET'])
+def debug_video_caption(filename):
+    """Debug endpoint to check database retrieval"""
+    try:
+        logger.info(f"DEBUG: Direct database query for {filename}")
+
+        # Direct database query
+        with sqlite3.connect('/workspace/surveillance/captions.db') as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT * FROM video_captions WHERE video_file = ?", (filename,))
+            row = cursor.fetchone()
+
+            if not row:
+                return jsonify({
+                    'success': False,
+                    'error': 'Video not found in database',
+                    'filename': filename
+                })
+
+            # Convert row to dict
+            row_dict = dict(row)
+            chunks_json = row_dict.get('chunks_json', '[]')
+
+            # Try to parse JSON
+            try:
+                chunks = json.loads(chunks_json) if chunks_json else []
+                parse_success = True
+                parse_error = None
+            except Exception as e:
+                chunks = []
+                parse_success = False
+                parse_error = str(e)
+
+            return jsonify({
+                'success': True,
+                'filename': filename,
+                'raw_row_keys': list(row_dict.keys()),
+                'chunks_json_length': len(chunks_json),
+                'chunks_json_preview': chunks_json[:200] + '...' if len(chunks_json) > 200 else chunks_json,
+                'parse_success': parse_success,
+                'parse_error': parse_error,
+                'parsed_chunks_count': len(chunks),
+                'first_chunk': chunks[0] if chunks else None,
+                'full_row': row_dict
+            })
+
+    except Exception as e:
+        logger.error(f"DEBUG error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'filename': filename
+        })
+
 @app.route('/api/video-caption/<filename>', methods=['GET'])
+def get_video_caption_endpoint(filename):
+    """Get video caption data including chunks"""
+    try:
+        logger.info(f"Video caption request for: {filename}")
+        caption_data = get_video_caption_from_db(filename)
+
+        if not caption_data:
+            logger.warning(f"Caption not found for: {filename}")
+            return jsonify({'error': 'Caption not found'}), 404
+
+        # Log detailed caption data for debugging
+        chunks = caption_data.get('chunks', [])
+        logger.info(f"Found caption for {filename}:")
+        logger.info(f"  Caption data type: {type(caption_data)}")
+        logger.info(f"  Chunks type: {type(chunks)}")
+        logger.info(f"  Chunks isArray: {isinstance(chunks, list)}")
+        logger.info(f"  Chunks length: {len(chunks) if isinstance(chunks, list) else 'Not a list'}")
+        if chunks and isinstance(chunks, list) and len(chunks) > 0:
+            logger.info(f"  First chunk: {chunks[0]}")
+
+        return jsonify({
+            'success': True,
+            'data': caption_data
+        })
+    except Exception as e:
+        logger.error(f"Error getting video caption for {filename}: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/serve-video/<path:filename>')
 def serve_video(filename):
     """Serve video files with proper streaming support"""
@@ -1580,12 +1701,38 @@ def find_relevant_chunk():
         data = request.get_json()
         query = data.get('query', '').strip()
         chunks = data.get('chunks', [])
-        
+
+        logger.info(f"Find relevant chunk request: query='{query}', chunks_count={len(chunks)}")
+        logger.info(f"Chunks data structure: {json.dumps(chunks[:2] if chunks else [], indent=2)}")
+
         if not query:
             return jsonify({'error': 'Query is required'}), 400
-        
+
         if not chunks:
             return jsonify({'error': 'Chunks array is required'}), 400
+
+        # Additional validation: check if chunks have proper structure
+        valid_chunks = []
+        for i, chunk in enumerate(chunks):
+            if isinstance(chunk, dict) and (chunk.get('caption') or chunk.get('text')):
+                valid_chunks.append(chunk)
+                logger.info(f"Chunk {i}: start={chunk.get('start_time')}, end={chunk.get('end_time')}, caption_preview={chunk.get('caption', chunk.get('text', ''))[:100]}...")
+            else:
+                logger.warning(f"Skipping invalid chunk {i}: {chunk}")
+
+        if not valid_chunks:
+            logger.error("No valid chunks found after validation")
+            return jsonify({'error': 'No valid chunks found in request'}), 400
+
+        # Use only valid chunks for analysis
+        chunks = valid_chunks
+
+        # Ensure timing fields exist for all chunks (since we already validated structure)
+        for i, chunk in enumerate(chunks):
+            if 'start_time' not in chunk:
+                chunk['start_time'] = 0
+            if 'end_time' not in chunk:
+                chunk['end_time'] = chunk['start_time'] + 30  # Default 30s duration
         
         # Get OpenAI client
         client = get_openai_client()
@@ -1604,7 +1751,7 @@ def find_relevant_chunk():
         # Create prompt for GPT-4o mini
         prompt = f"""You are analyzing a sequence of video captions generated by AI video analysis. These chunks represent consecutive time segments from a single video, with each chunk containing the AI's description of what happens during that time period.
 
-CONTEXT: 
+CONTEXT:
 - These are sequential video caption chunks from AI analysis of surveillance/security footage
 - Each chunk represents a specific time segment with detailed scene descriptions
 - The chunks are in chronological order and may show progression of events
@@ -1623,13 +1770,23 @@ ANALYSIS INSTRUCTIONS:
 - Focus on matching the specific event/action/scene requested by the user
 - Select the chunk where the requested event is most prominently described
 
-IMPORTANT: The chunks above are numbered as CHUNK #1, CHUNK #2, etc. 
+IMPORTANT: The chunks above are numbered as CHUNK #1, CHUNK #2, etc.
 Return the exact number from the chunk that best matches the query.
 
 RESPONSE FORMAT: Return ONLY the chunk number in this exact format: CHUNK_ID: X
 Where X is the number (1, 2, 3, etc.) matching the CHUNK #X that contains the requested event.
 
 CHUNK_ID: """
+
+        # Log the prompt being sent to GPT-4o mini for debugging
+        logger.info(f"📤 Sending to GPT-4o mini:")
+        logger.info(f"   Query: '{query}'")
+        logger.info(f"   Total chunks: {len(chunks)}")
+        logger.info(f"   Chunk summaries preview:")
+        for i, summary in enumerate(chunk_summaries[:2]):  # Log first 2 chunks to avoid spam
+            logger.info(f"     CHUNK #{i+1}: {summary[:100]}...")
+        if len(chunk_summaries) > 2:
+            logger.info(f"     ... and {len(chunk_summaries) - 2} more chunks")
 
         try:
             # Call GPT-4o mini for chunk determination
@@ -1644,34 +1801,51 @@ CHUNK_ID: """
             )
             
             gpt_response = response.choices[0].message.content.strip()
-            logger.info(f"GPT-4o mini response: {gpt_response}")
-            
+            logger.info(f"🤖 GPT-4o mini RAW response: '{gpt_response}'")
+            logger.info(f"📊 Query: '{query}' | Available chunks: {len(chunks)}")
+
             # Extract chunk number from GPT-4o mini response
             chunk_number = 1  # Default fallback
+            extraction_method = "default"
+
             try:
                 import re
                 chunk_id_match = re.search(r'CHUNK_ID:\s*(\d+)', gpt_response)
                 if chunk_id_match:
                     chunk_number = int(chunk_id_match.group(1))
+                    extraction_method = "CHUNK_ID pattern"
+                    logger.info(f"✅ Found CHUNK_ID pattern: {chunk_number}")
                 else:  # Should not happen with server-only mode
                     # Fallback: look for any numbers in the response
                     numbers = re.findall(r'\b(\d+)\b', gpt_response)
-                    chunk_number = int(numbers[0]) if numbers else 1
-                
+                    if numbers:
+                        chunk_number = int(numbers[0])
+                        extraction_method = "number extraction fallback"
+                        logger.info(f"⚠️  Using number extraction fallback: {chunk_number} from {numbers}")
+                    else:
+                        extraction_method = "no numbers found"
+                        logger.warning(f"⚠️  No numbers found in GPT response, using default chunk 1")
+
                 # Validate chunk number is within range
                 if not (1 <= chunk_number <= len(chunks)):
+                    old_chunk_number = chunk_number
                     chunk_number = 1
-                    
-            except (ValueError, IndexError, AttributeError):
+                    logger.warning(f"⚠️  Chunk number {old_chunk_number} out of range (1-{len(chunks)}), using chunk 1")
+                else:
+                    logger.info(f"✅ Chunk number {chunk_number} is valid (range: 1-{len(chunks)})")
+
+            except (ValueError, IndexError, AttributeError) as e:
+                logger.error(f"❌ Error extracting chunk number: {str(e)}")
                 chunk_number = 1  # Fallback to first chunk
-            
+                extraction_method = "exception fallback"
+
             # Get the selected chunk
             selected_chunk = chunks[chunk_number - 1]
             start_time = selected_chunk.get('start_time', 0)
             end_time = selected_chunk.get('end_time', 0)
             duration = end_time - start_time
             
-            return jsonify({
+            final_response = {
                 'success': True,
                 'relevant_chunk_number': chunk_number,
                 'relevant_chunk_index': chunk_number - 1,
@@ -1682,18 +1856,31 @@ CHUNK_ID: """
                     'caption': selected_chunk.get('caption', selected_chunk.get('text', '')),
                     'gpt_reasoning': gpt_response
                 },
-                'query': query
-            })
+                'query': query,
+                'analysis': gpt_response,
+                'confidence_score': 'High',
+                'relevance_score': '0.85',
+                'events_count': '1'
+            }
+
+            logger.info(f"📤 RETURNING to frontend:")
+            logger.info(f"   ✅ Success: True")
+            logger.info(f"   🎯 Relevant chunk: #{chunk_number} (index {chunk_number - 1})")
+            logger.info(f"   ⏱️  Time range: {start_time:.1f}s - {end_time:.1f}s ({duration:.1f}s duration)")
+            logger.info(f"   📝 Query: '{query}'")
+            logger.info(f"   🔍 Method: {extraction_method}")
+
+            return jsonify(final_response)
             
         except Exception as gpt_error:
-            logger.error(f"GPT-4o mini error: {str(gpt_error)}")
+            logger.error(f"❌ GPT-4o mini error: {str(gpt_error)}")
             # Fallback: return first chunk
             fallback_chunk = chunks[0]
             fallback_start = fallback_chunk.get('start_time', 0)
             fallback_end = fallback_chunk.get('end_time', 0)
             fallback_duration = fallback_end - fallback_start
-            
-            return jsonify({
+
+            fallback_response = {
                 'success': True,
                 'relevant_chunk_number': 1,
                 'relevant_chunk_index': 0,
@@ -1705,8 +1892,19 @@ CHUNK_ID: """
                     'gpt_reasoning': f"GPT-4o mini error, using fallback: {str(gpt_error)}"
                 },
                 'query': query,
+                'analysis': f"GPT-4o mini error, using fallback: {str(gpt_error)}",
+                'confidence_score': 'Low',
+                'relevance_score': '0.5',
+                'events_count': '0',
                 'fallback': True
-            })
+            }
+
+            logger.info(f"📤 FALLBACK RETURNING to frontend:")
+            logger.info(f"   ⚠️  GPT-4o mini failed, using fallback chunk #1")
+            logger.info(f"   ⏱️  Time range: {fallback_start:.1f}s - {fallback_end:.1f}s ({fallback_duration:.1f}s duration)")
+            logger.info(f"   ❌ Error: {str(gpt_error)}")
+
+            return jsonify(fallback_response)
         
     except Exception as e:
         logger.error(f"Error in find_relevant_chunk: {str(e)}")

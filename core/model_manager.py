@@ -384,15 +384,9 @@ class ModelManager:
                 pixel_values = pixel_values.to(torch.bfloat16).to(self.model.device)
                 logger.info("Using bfloat16 precision for full precision model")
             
-            # Check if this is temporal analysis and create enhanced video prefix with timestamps
-            if hasattr(self, 'current_frame_timestamps') and self.current_frame_timestamps:
-                # Use timestamps for temporal analysis - annotate all frames
-                temporal_frames = [f"Frame{i+1} (t={self.current_frame_timestamps[i]:.1f}s): <image>\n" for i in range(len(num_patches_list))]
-                video_prefix = "".join(temporal_frames)
-                logger.info(f"Using temporal video prefix with timestamps for all {len(self.current_frame_timestamps)} frames")
-            else:
-                # Use standard prefix for non-temporal analysis
-                video_prefix = "".join([f"Frame{i+1}: <image>\n" for i in range(len(num_patches_list))])
+            # Use standard video prefix to avoid tracking behavior
+            video_prefix = "".join([f"Frame{i+1}: <image>\n" for i in range(len(num_patches_list))])
+            logger.info(f"Using standard video prefix for {len(num_patches_list)} frames")
 
             # Prepare generation config - use provided config or enhanced default
             if generation_config is None:
@@ -400,9 +394,9 @@ class ModelManager:
                     do_sample=True,
                     temperature=0.3,
                     max_new_tokens=max_tokens,
-                    top_p=0.8,
+                    top_p=0.9,
                     num_beams=1,
-                    repetition_penalty=1.2,
+                    repetition_penalty=1.1,
                     length_penalty=1.0
                 )
             else:
@@ -571,10 +565,10 @@ class ModelManager:
             generation_config = dict(
                 do_sample=True,
                 temperature=0.3,
-                max_new_tokens=max_tokens,
-                top_p=0.8,
+                max_new_tokens=min(1024, max_tokens),
+                top_p=0.9,
                 num_beams=1,
-                repetition_penalty=1.2,
+                repetition_penalty=1.1,
                 length_penalty=1.0
             )
             

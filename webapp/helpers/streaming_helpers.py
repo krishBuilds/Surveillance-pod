@@ -59,6 +59,11 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
         from .video_processing import calculate_video_chunks
         logger.info(f"[{request_id}] Duration type: {type(duration)}, value: {duration}")
         chunks = calculate_video_chunks(duration, chunk_size, processing_mode)
+        logger.info(f"[{request_id}] Calculated {len(chunks)} chunks:")
+        for i, chunk in enumerate(chunks[:3]):  # Log first 3 chunks
+            logger.info(f"[{request_id}]   Chunk {i}: ID={chunk.get('chunk_id')}, start={chunk.get('start_time')}, end={chunk.get('end_time')}")
+        if len(chunks) > 3:
+            logger.info(f"[{request_id}]   ... and {len(chunks) - 3} more chunks")
         
         total_chunks = len(chunks)
         logger.info(f"[{request_id}] Processing {total_chunks} chunks for {duration:.1f}s video")
@@ -97,7 +102,7 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
                 model_manager=manager,
                 video_path=video_path,
                 prompt=prompt,
-                num_frames=manager.model_manager.get_optimal_frame_count(),
+                num_frames=manager.get_optimal_frame_count(),
                 start_time=chunk['start_time'],
                 end_time=chunk['end_time'],
                 fps_sampling=fps_sampling,
@@ -109,13 +114,15 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
             
             if result.get('success'):
                 caption = result.get('caption', '')
-                all_captions.append({
+                chunk_data = {
                     'chunk_id': chunk['chunk_id'],
                     'start_time': chunk['start_time'],
                     'end_time': chunk['end_time'],
                     'caption': caption,
                     'processing_time': chunk_processing_time
-                })
+                }
+                logger.info(f"[{request_id}] Adding to all_captions: {chunk_data}")
+                all_captions.append(chunk_data)
                 
                 # Send chunk completion
                 yield {
@@ -123,6 +130,8 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
                     'chunk': i + 1,
                     'total_chunks': total_chunks,
                     'chunk_id': chunk['chunk_id'],
+                    'start_time': chunk['start_time'],
+                    'end_time': chunk['end_time'],
                     'caption': caption,
                     'processing_time': chunk_processing_time,
                     'progress': ((i + 1) / total_chunks) * 100,
@@ -259,7 +268,7 @@ def process_video_for_caption_optimized(manager, video_path: str, video_file: st
                 model_manager=manager,
                 video_path=video_path,
                 prompt=prompt,
-                num_frames=manager.model_manager.get_optimal_frame_count(),
+                num_frames=manager.get_optimal_frame_count(),
                 start_time=0,
                 end_time=duration,
                 fps_sampling=fps_sampling,
@@ -384,7 +393,7 @@ def format_captions_as_list(captions: List[Dict]) -> str:
 
 # Import the process_video_segment function from video_processing
 def process_video_segment(model_manager, video_path: str, prompt: str, num_frames: int,
-                         start_time: float, end_time: float, fps_sampling: float = 1.0,
+                         start_time: float, end_time: float, fps_sampling: float = 3.0,
                          generation_config: Dict = None) -> Dict:
     """Import from video_processing module"""
     from .video_processing import process_video_segment as video_process_segment

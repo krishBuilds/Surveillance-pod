@@ -13,7 +13,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 def process_video_segment(model_manager, video_path: str, prompt: str, num_frames: int,
-                         start_time: float, end_time: float, fps_sampling: float = 1.0,
+                         start_time: float, end_time: float, fps_sampling: float = 3.0,
                          generation_config: Dict = None) -> Dict:
     """
     Process a video segment with temporal bounds and frame control
@@ -87,7 +87,7 @@ def process_video_segment(model_manager, video_path: str, prompt: str, num_frame
         }
 
 def process_temporal_video_segment(model_manager, video_path: str, prompt: str, num_frames: int,
-                                 start_time: float, end_time: float, fps_sampling: float = 1.0,
+                                 start_time: float, end_time: float, fps_sampling: float = 3.0,
                                  generation_config: Dict = None) -> Dict:
     """
     Process video segment with temporal analysis - focused on time-based events
@@ -120,20 +120,16 @@ def process_temporal_video_segment(model_manager, video_path: str, prompt: str, 
         for i, timestamp in enumerate(frame_timestamps):
             frame_annotations.append(f"Frame {i+1} (t={timestamp:.1f}s): <image>")
 
-        temporal_prompt = f"""Report events with timestamps in seconds.
+        temporal_prompt = "What happens in this video? Describe the main actions and events."
 
-{chr(10).join(frame_annotations)}
-
-Focus on timing of key events with specific seconds."""
-
-        # Use enhanced generation config for temporal analysis (better for detailed responses)
+        # Use more permissive generation config to avoid tracking mode
         temporal_generation_config = {
             'do_sample': True,
-            'temperature': 0.3,
+            'temperature': 0.7,    # Higher temperature for more creative output
             'max_new_tokens': 1024,
-            'top_p': 0.8,
+            'top_p': 0.9,
             'num_beams': 1,
-            'repetition_penalty': 1.2,
+            'repetition_penalty': 1.1,
             'length_penalty': 1.0
         }
 
@@ -168,6 +164,121 @@ Focus on timing of key events with specific seconds."""
             'analysis_type': 'temporal_enhanced'
         }
 
+def merge_events_from_chunks(chunks: List[Dict], time_threshold: float = 2.0) -> List[Dict]:
+    """
+    Merge events from different chunks that span chunk boundaries
+
+    Args:
+        chunks: List of chunk dictionaries with event data
+        time_threshold: Maximum time gap to consider events as continuous (seconds)
+
+    Returns:
+        List of merged events with unified timing
+    """
+    merged_events = []
+
+    for chunk in chunks:
+        chunk_events = chunk.get('events', [])
+        chunk_start = chunk.get('start_time', 0)
+        chunk_end = chunk.get('end_time', 0)
+
+        for event in chunk_events:
+            # Convert event times to absolute video timeline
+            abs_start = chunk_start + event.get('start_offset', 0)
+            abs_end = chunk_start + event.get('end_offset', 0)
+
+            # Check if this event can be merged with any existing event
+            merged = False
+            for existing_event in merged_events:
+                # Check if events overlap or are very close
+                if (abs(abs_start - existing_event['end']) <= time_threshold or
+                    abs(abs_end - existing_event['start']) <= time_threshold or
+                    (abs_start >= existing_event['start'] and abs_start <= existing_event['end']) or
+                    (abs_end >= existing_event['start'] and abs_end <= existing_event['end'])):
+
+                    # Merge events
+                    existing_event['start'] = min(existing_event['start'], abs_start)
+                    existing_event['end'] = max(existing_event['end'], abs_end)
+                    existing_event['description'] = f"{existing_event['description']} and {event['description']}"
+                    existing_event['details'] = f"{existing_event['details']}; {event.get('details', '')}"
+                    merged = True
+                    break
+
+            if not merged:
+                merged_events.append({
+                    'description': event.get('description', ''),
+                    'start': abs_start,
+                    'end': abs_end,
+                    'details': event.get('details', ''),
+                    'source_chunks': [chunk.get('chunk_id', 0)]
+                })
+
+    # Sort by start time
+    merged_events.sort(key=lambda x: x['start'])
+    return merged_events
+
+def parse_temporal_events_from_response(response_text: str, chunk_start_time: float = 0) -> List[Dict]:
+    """
+    Parse temporal events from model response using Event/Start/End/Details format
+
+    Args:
+        response_text: Model response text
+        chunk_start_time: Start time of this chunk for absolute timeline conversion
+
+    Returns:
+        List of parsed events with relative timing
+    """
+    events = []
+
+    # Split response into lines and look for Event patterns
+    lines = response_text.split('\n')
+    current_event = {}
+
+    for line in lines:
+        line = line.strip()
+
+        # Parse Event line
+        if line.startswith('Event:') and ':' in line:
+            # Save previous event if exists
+            if current_event:
+                events.append(current_event.copy())
+
+            current_event = {
+                'description': line.split(':', 1)[1].strip(),
+                'start_offset': 0,
+                'end_offset': 0,
+                'details': ''
+            }
+
+        # Parse Start time
+        elif line.startswith('Start:') and current_event:
+            try:
+                time_str = line.split(':', 1)[1].strip().replace('s', '')
+                current_event['start_offset'] = float(time_str)
+            except (ValueError, IndexError):
+                pass
+
+        # Parse End time
+        elif line.startswith('End:') and current_event:
+            try:
+                time_str = line.split(':', 1)[1].strip().replace('s', '')
+                current_event['end_offset'] = float(time_str)
+            except (ValueError, IndexError):
+                pass
+
+        # Parse Details
+        elif line.startswith('Details:') and current_event:
+            current_event['details'] = line.split(':', 1)[1].strip()
+
+    # Add the last event if exists
+    if current_event and current_event.get('description'):
+        events.append(current_event)
+
+    # Filter out events without proper timing
+    valid_events = [e for e in events if e['start_offset'] >= 0 and e['end_offset'] > e['start_offset']]
+
+    return valid_events
+
 def calculate_video_chunks(duration: float, chunk_size: int = 60, processing_mode: str = 'sequential') -> List[Dict]:
     """
     Calculate video chunks for processing
@@ -191,7 +302,7 @@ def calculate_video_chunks(duration: float, chunk_size: int = 60, processing_mod
             end_time = min((i + 1) * chunk_size, duration)
             
             chunks.append({
-                'chunk_id': i,
+                'chunk_id': i + 1,  # Start chunk IDs from 1
                 'start_time': start_time,
                 'end_time': end_time,
                 'duration': end_time - start_time,
@@ -279,9 +390,8 @@ def get_video_caption_data(video_file: str) -> Dict[str, Any]:
         
         # Try to get caption data from database
         try:
-            from simple_caption_storage import SimpleCaptionStorage
-            caption_db = SimpleCaptionStorage()
-            caption_data = caption_db.get_caption(video_file)
+            from .db_utils import get_video_caption
+            caption_data = get_video_caption(video_file)
             
             if caption_data:
                 video_data['caption'] = caption_data

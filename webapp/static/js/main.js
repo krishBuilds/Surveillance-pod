@@ -161,12 +161,24 @@ class SurveillanceApp {
             videoSelector.addEventListener('change', async (e) => {
                 const videoFile = e.target.value;
                 const temporalBtn = document.getElementById('temporal-analysis-btn');
-                
+
+                console.log('🎯 Video selector changed to:', videoFile);
+
                 if (videoFile) {
-                    await this.displayVideoInfoForAnalysis(videoFile);
-                    await this.loadChunkDataForAnalysis(videoFile);
-                    if (analyzeBtn) analyzeBtn.disabled = false;
-                    if (temporalBtn) temporalBtn.disabled = false;
+                    try {
+                        console.log('📞 Calling displayVideoInfoForAnalysis...');
+                        await this.displayVideoInfoForAnalysis(videoFile);
+                        console.log('✅ displayVideoInfoForAnalysis completed');
+
+                        console.log('📞 Calling loadChunkDataForAnalysis...');
+                        await this.loadChunkDataForAnalysis(videoFile);
+                        console.log('✅ loadChunkDataForAnalysis completed');
+
+                        if (analyzeBtn) analyzeBtn.disabled = false;
+                        if (temporalBtn) temporalBtn.disabled = false;
+                    } catch (error) {
+                        console.error('❌ Error in video selector change handler:', error);
+                    }
                 } else {
                     this.hideVideoInfoDisplay();
                     if (analyzeBtn) analyzeBtn.disabled = true;
@@ -179,8 +191,12 @@ class SurveillanceApp {
             analyzeBtn.addEventListener('click', async () => {
                 const videoFile = videoSelector?.value;
                 const query = document.getElementById('chunk-query')?.value?.trim();
+                console.log('Analyze button clicked:', { videoFile, query });
                 if (videoFile && query) {
                     await this.findRelevantChunk(videoFile, query);
+                } else {
+                    console.error('Missing videoFile or query:', { videoFile, query });
+                    showNotification('Please select a video and enter a query', 'error');
                 }
             });
         }
@@ -227,11 +243,21 @@ class SurveillanceApp {
 
     async displayVideoInfoForAnalysis(videoFile) {
         try {
-            const response = await fetch(`/api/video-caption/${videoFile}`);
+            const url = `/api/video-caption/${encodeURIComponent(videoFile)}`;
+            console.log('📡 displayVideoInfoForAnalysis requesting:', url);
+            const response = await fetch(url);
             const result = await response.json();
             const data = result.data || result; // Handle nested data structure
             
-            if (data && result.success !== false) {
+            console.log('📥 displayVideoInfoForAnalysis response:', result);
+            console.log('📥 displayVideoInfoForAnalysis data:', data);
+            console.log('📥 displayVideoInfoForAnalysis success check:', {
+                hasData: !!data,
+                success: result.success,
+                successNotFalse: result.success !== false
+            });
+
+            if (data && result.success === true) {
                 const infoDisplay = document.getElementById('video-info-display');
                 if (infoDisplay) {
                     infoDisplay.style.display = 'block';
@@ -280,13 +306,26 @@ class SurveillanceApp {
 
     async loadChunkDataForAnalysis(videoFile) {
         try {
-            const response = await fetch(`/api/video-caption/${videoFile}`);
+            const url = `/api/video-caption/${encodeURIComponent(videoFile)}`;
+            console.log('📥 loadChunkDataForAnalysis fetching:', url);
+            console.log('📥 loadChunkDataForAnalysis videoFile:', videoFile);
+
+            const response = await fetch(url);
             const result = await response.json();
             const data = result.data || result; // Handle nested data structure
-            
+
+            console.log('📥 loadChunkDataForAnalysis response:', result);
+            console.log('📥 Raw API response structure:', {
+                hasData: !!result.data,
+                dataKeys: result.data ? Object.keys(result.data) : [],
+                chunksInData: !!result.data?.chunks,
+                chunksInRoot: !!result.chunks
+            });
+            console.log('📥 loadChunkDataForAnalysis chunks:', data.chunks ? data.chunks.length : 'none');
+
             const chunkDataTextarea = document.getElementById('chunk-data');
             const currentVideoFile = document.getElementById('current-video-file');
-            
+
             if (chunkDataTextarea && data.chunks) {
                 // Format chunks for display
                 const formattedChunks = data.chunks.map(chunk => ({
@@ -296,14 +335,18 @@ class SurveillanceApp {
                     caption: chunk.caption || ''
                 }));
                 chunkDataTextarea.value = JSON.stringify(formattedChunks, null, 2);
+                console.log('✅ Chunks loaded into textarea:', formattedChunks.length);
+            } else {
+                console.warn('⚠️ No chunks found in response data');
             }
-            
+
             // Store current video file for segment playback
             if (currentVideoFile) {
                 currentVideoFile.value = videoFile;
+                console.log('✅ Current video file set to:', videoFile);
             }
         } catch (error) {
-            console.error('Error loading chunk data:', error);
+            console.error('❌ Error loading chunk data:', error);
         }
     }
 
@@ -323,14 +366,55 @@ class SurveillanceApp {
         
         try {
             // First, fetch the stored captions for this video
-            const captionsResponse = await fetch(`/api/video-caption/${encodeURIComponent(videoFile)}`);
+            const captionsUrl = `/api/video-caption/${encodeURIComponent(videoFile)}`;
+            console.log('Fetching captions from:', captionsUrl);
+            console.log('Video file:', videoFile);
+
+            const captionsResponse = await fetch(captionsUrl);
             const captionsData = await captionsResponse.json();
-            
-            if (!captionsData.success || !captionsData.data || !captionsData.data.chunks) {
-                throw new Error('No caption chunks found for this video');
+
+            console.log('Captions response:', captionsData);
+
+            console.log('🔍 Validating captions data structure:');
+            console.log('   captionsData.success:', captionsData.success);
+            console.log('   captionsData.data exists:', !!captionsData.data);
+            console.log('   captionsData.data.chunks exists:', !!captionsData.data?.chunks);
+            console.log('   captionsData.data.chunks length:', captionsData.data?.chunks?.length || 0);
+            console.log('   captionsData.chunks exists (root):', !!captionsData.chunks);
+            console.log('   captionsData.chunks length (root):', captionsData.chunks?.length || 0);
+
+            // Handle both nested and flat response structures
+            const data = captionsData.data || captionsData;
+            const chunks = data.chunks || [];
+
+            console.log('🔍 Detailed chunk analysis:');
+            console.log('   Raw captionsData:', captionsData);
+            console.log('   Extracted data:', data);
+            console.log('   Chunks array:', chunks);
+            console.log('   Chunks type:', typeof chunks);
+            console.log('   Chunks isArray:', Array.isArray(chunks));
+            console.log('   Chunks length:', chunks.length);
+            if (chunks && chunks.length > 0) {
+                console.log('   First chunk:', chunks[0]);
+                console.log('   First chunk type:', typeof chunks[0]);
             }
-            
-            const chunks = captionsData.data.chunks;
+
+            if (!captionsData.success || !chunks || chunks.length === 0) {
+                console.error('❌ Invalid captions data structure:', {
+                    success: captionsData.success,
+                    hasData: !!captionsData.data,
+                    hasChunks: !!chunks,
+                    chunksLength: chunks.length,
+                    fullResponse: captionsData
+                });
+                throw new Error(`No caption chunks found for this video. Debug: success=${captionsData.success}, hasChunks=${!!chunks}, chunksLength=${chunks.length}`);
+            }
+            console.log('✅ Found chunks:', chunks.length, 'chunks');
+            console.log('📤 Sending to backend:', {
+                query: query,
+                chunksCount: chunks.length,
+                firstChunkPreview: chunks[0]?.caption?.substring(0, 100) + '...'
+            });
             
             const response = await fetch('/api/find-relevant-chunk', {
                 method: 'POST',
