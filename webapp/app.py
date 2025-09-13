@@ -38,7 +38,8 @@ from helpers import (
     serve_video,
     validate_video_file,
     get_video_caption_data,
-    create_response
+    create_response,
+    GPTTimelineProcessor
 )
 
 # Import temporal analysis helpers
@@ -312,7 +313,7 @@ def generate_caption_stream():
         video_file = data.get('video_file', '')
         fps_sampling = float(data.get('fps_sampling', 3.0))
         chunk_size = int(data.get('chunk_size', 30))
-        prompt = data.get('prompt', 'What happens in this video? Describe the main actions and events.')
+        prompt = data.get('prompt', 'Analyze the entire video segment and describe all visible activities, people, objects, and events throughout the full duration.')
         processing_mode = data.get('processing_mode', 'sequential')
         output_format = data.get('output_format', 'paragraph')
     except Exception as e:
@@ -636,7 +637,7 @@ def generate_caption():
         video_file = data.get('video_file', '')
         fps_sampling = float(data.get('fps_sampling', 3.0))
         chunk_size = int(data.get('chunk_size', 30))
-        prompt = data.get('prompt', 'What happens in this video? Describe the main actions and events.')
+        prompt = data.get('prompt', 'Analyze the entire video segment and describe all visible activities, people, objects, and events throughout the full duration.')
         processing_mode = data.get('processing_mode', 'sequential')
         output_format = data.get('output_format', 'paragraph')
         
@@ -692,12 +693,8 @@ def generate_caption():
                 video_info = manager.model_manager.get_video_info(video_path)
                 video_duration = video_info.get('duration', 0)
             
-            # Create simple, natural prompt for video description
-            temporal_prompt = f"""Describe what happens in this {video_duration:.1f} second video in a natural, flowing narrative style.
-
-Write a clear, engaging description that tells the story of what unfolds throughout the video. Focus on the main actions, characters, and key moments without using technical formatting or frame numbers.
-
-Keep the description conversational and easy to read, as if you're telling someone what you saw in the video."""
+            # Use the user-provided prompt for video description
+            temporal_prompt = prompt
 
             # Process entire video with temporal analysis
             if True:  # Always use model server
@@ -831,7 +828,7 @@ def generate_caption_original():
         video_file = data.get('video_file', '')
         fps_sampling = float(data.get('fps_sampling', 3.0))
         chunk_size = int(data.get('chunk_size', 30))
-        prompt = data.get('prompt', 'What happens in this video? Describe the main actions and events.')
+        prompt = data.get('prompt', 'Analyze the entire video segment and describe all visible activities, people, objects, and events throughout the full duration.')
         processing_mode = data.get('processing_mode', 'sequential')
         output_format = data.get('output_format', 'paragraph')
         
@@ -1251,6 +1248,68 @@ def get_stored_captions():
         logger.error(f"Error fetching stored captions: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/test-db', methods=['GET'])
+def test_db():
+    """Test database connection and basic functions"""
+    try:
+        videos = get_all_videos_with_captions()
+        return jsonify({
+            'success': True,
+            'message': f'Database connection successful, found {len(videos)} videos',
+            'videos': videos[:2]  # Return first 2 for testing
+        })
+    except Exception as e:
+        logger.error(f"Database test failed: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/videos/processed', methods=['GET'])
+def get_processed_videos():
+    """Get list of all processed videos for timeline generation"""
+    try:
+        # Use direct database access to avoid import issues
+        from simple_caption_storage import SimpleCaptionStorage
+
+        # Initialize storage directly
+        storage = SimpleCaptionStorage()
+        videos = storage.get_all_videos_with_captions()
+        logger.info(f"Found {len(videos)} videos with captions")
+
+        # Transform data for timeline page needs
+        processed_videos = []
+        for video in videos:
+            try:
+                caption_data = storage.get_video_caption(video['filename'])
+                chunks_count = len(caption_data.get('chunks', [])) if caption_data else 0
+                duration = caption_data.get('video_duration', 0) if caption_data else 0
+
+                processed_videos.append({
+                    'filename': video['filename'],
+                    'chunks': chunks_count,
+                    'duration': duration,
+                    'created_at': video.get('created_at'),
+                    'has_captions': video.get('has_captions', False)
+                })
+                logger.info(f"Processed video: {video['filename']}, chunks: {chunks_count}, duration: {duration}")
+            except Exception as e:
+                logger.error(f"Error processing video {video['filename']}: {str(e)}")
+                # Add basic video info even if caption data fails
+                processed_videos.append({
+                    'filename': video['filename'],
+                    'chunks': 0,
+                    'duration': 0,
+                    'created_at': video.get('created_at'),
+                    'has_captions': False
+                })
+
+        logger.info(f"Returning {len(processed_videos)} processed videos")
+        return jsonify({
+            'success': True,
+            'videos': processed_videos
+        })
+    except Exception as e:
+        logger.error(f"Error fetching processed videos: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/debug-caption/<filename>', methods=['GET'])
 def debug_video_caption(filename):
     """Debug endpoint to check database retrieval"""
@@ -1479,14 +1538,8 @@ def temporal_analysis():
 
                     logger.info(f"[{request_id}] Segment analysis params: {num_frames} frames, {fps_sampling:.2f} FPS")
 
-                    # Create enhanced temporal analysis prompt with timing information
-                    temporal_prompt = f"""Analyze this {segment_duration:.1f} second video segment and describe what happens with specific timing information.
-
-Focus on the main actions, characters, and key moments. When describing events, include approximately when they occur within this segment (e.g., "at the beginning", "around the middle", "towards the end").
-
-Keep the description natural and conversational while noting the timing of important events.
-
-Focus: {query}"""
+                    # Use the user-provided prompt for temporal analysis
+                    temporal_prompt = prompt
 
                     # Initialize events variable
                     events = []
@@ -1605,7 +1658,7 @@ Focus on temporal aspects and specific timing details."""
                         {"role": "system", "content": "You are a video temporal analysis expert providing detailed timing insights."},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=250,
+                    max_tokens=1024,
                     temperature=0.3
                 )
                 
@@ -1909,6 +1962,247 @@ CHUNK_ID: """
     except Exception as e:
         logger.error(f"Error in find_relevant_chunk: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/generate-timeline', methods=['POST'])
+def generate_timeline():
+    """Generate structured timeline events from video captions using GPT-4o mini"""
+    request_id = str(int(time.time()))[-6:]
+
+    try:
+        logger.info(f"[{request_id}] === TIMELINE GENERATION REQUEST START ===")
+
+        # Get OpenAI client
+        openai_client = get_openai_client()
+        if not openai_client:
+            logger.error(f"[{request_id}] FAILED: OpenAI client not initialized")
+            return jsonify({'error': 'OpenAI client not initialized'}), 500
+
+        data = request.get_json()
+        logger.info(f"[{request_id}] Timeline request data: {json.dumps(data, indent=2)}")
+
+        # Extract parameters
+        video_file = data.get('video_file', '')
+        captions = data.get('captions', [])
+        video_info = data.get('video_info', {})
+        total_duration = float(data.get('total_duration', 0))
+
+        if not captions:
+            return jsonify({'error': 'No captions provided for timeline generation'}), 400
+
+        # Initialize GPT Timeline Processor
+        gpt_processor = GPTTimelineProcessor(
+            api_key=openai_config['openai']['api_key'] if openai_config else None
+        )
+
+        # Process captions to generate structured timeline
+        timeline_data = gpt_processor.process_captions_to_timeline(
+            captions=captions,
+            video_info=video_info,
+            total_duration=total_duration
+        )
+
+        # Extract key frame timestamps for potential image extraction
+        key_frames = gpt_processor.extract_key_frame_timestamps(timeline_data.get('events', []))
+
+        # Generate thumbnail suggestions
+        thumbnail_suggestions = gpt_processor.generate_thumbnail_suggestions(timeline_data.get('events', []))
+
+        result = {
+            'success': True,
+            'timeline_data': timeline_data,
+            'key_frames': key_frames,
+            'thumbnail_suggestions': thumbnail_suggestions,
+            'video_file': video_file,
+            'processing_time': timeline_data.get('timeline_metadata', {}).get('processing_timestamp', ''),
+            'total_events': len(timeline_data.get('events', [])),
+            'request_id': request_id
+        }
+
+        logger.info(f"[{request_id}] Timeline generation successful")
+        logger.info(f"[{request_id}] Total events generated: {len(timeline_data.get('events', []))}")
+        logger.info(f"[{request_id}] Key frames identified: {len(key_frames)}")
+        logger.info(f"[{request_id}] === TIMELINE GENERATION REQUEST END ===")
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"[{request_id}] EXCEPTION: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Timeline generation error: {str(e)}'}), 500
+
+@app.route('/extract-frame', methods=['POST'])
+def extract_frame():
+    """Extract a frame from video at specific timestamp for timeline thumbnail"""
+    request_id = str(int(time.time()))[-6:]
+
+    try:
+        logger.info(f"[{request_id}] === FRAME EXTRACTION REQUEST START ===")
+
+        data = request.get_json()
+        video_file = data.get('video_file', '')
+        timestamp = float(data.get('timestamp', 0))
+        frame_id = data.get('frame_id', f'frame_{timestamp}')
+
+        if not video_file:
+            return jsonify({'error': 'No video file specified'}), 400
+
+        video_path = os.path.join('/workspace/surveillance/inputs/videos', video_file)
+        if not os.path.exists(video_path):
+            return jsonify({'error': 'Video file not found'}), 404
+
+        # Import here to avoid dependency issues if not available
+        try:
+            import cv2
+            import numpy as np
+            from PIL import Image
+            import io
+            import base64
+        except ImportError as e:
+            logger.error(f"[{request_id}] Required libraries not available: {str(e)}")
+            return jsonify({'error': 'Image processing libraries not available'}), 500
+
+        # Extract frame using OpenCV
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return jsonify({'error': 'Could not open video file'}), 500
+
+        # Set position to timestamp
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_number = int(timestamp * fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+
+        # Read frame
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            return jsonify({'error': 'Could not extract frame at timestamp'}), 500
+
+        # Convert to RGB (OpenCV uses BGR)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Convert to PIL Image
+        pil_image = Image.fromarray(frame_rgb)
+
+        # Create thumbnail
+        thumbnail_size = (160, 120)
+        pil_image.thumbnail(thumbnail_size, Image.Resampling.LANCZOS)
+
+        # Convert to base64
+        buffer = io.BytesIO()
+        pil_image.save(buffer, format='JPEG', quality=85)
+        buffer.seek(0)
+        image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+        result = {
+            'success': True,
+            'frame_id': frame_id,
+            'timestamp': timestamp,
+            'image_data': f'data:image/jpeg;base64,{image_base64}',
+            'width': pil_image.width,
+            'height': pil_image.height,
+            'video_file': video_file,
+            'request_id': request_id
+        }
+
+        logger.info(f"[{request_id}] Frame extraction successful")
+        logger.info(f"[{request_id}] Timestamp: {timestamp}s, Size: {pil_image.width}x{pil_image.height}")
+        logger.info(f"[{request_id}] === FRAME EXTRACTION REQUEST END ===")
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"[{request_id}] EXCEPTION: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Frame extraction error: {str(e)}'}), 500
+
+@app.route('/extract-keyframes', methods=['POST'])
+def extract_keyframes():
+    """Extract multiple key frames for timeline events"""
+    request_id = str(int(time.time()))[-6:]
+
+    try:
+        logger.info(f"[{request_id}] === KEYFRAMES EXTRACTION REQUEST START ===")
+
+        data = request.get_json()
+        video_file = data.get('video_file', '')
+        keyframes = data.get('keyframes', [])  # Array of timestamps
+
+        if not video_file or not keyframes:
+            return jsonify({'error': 'Video file and keyframes required'}), 400
+
+        video_path = os.path.join('/workspace/surveillance/inputs/videos', video_file)
+        if not os.path.exists(video_path):
+            return jsonify({'error': 'Video file not found'}), 404
+
+        # Import required libraries
+        try:
+            import cv2
+            import numpy as np
+            from PIL import Image
+            import io
+            import base64
+        except ImportError as e:
+            logger.error(f"[{request_id}] Required libraries not available: {str(e)}")
+            return jsonify({'error': 'Image processing libraries not available'}), 500
+
+        extracted_frames = []
+
+        # Open video once
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return jsonify({'error': 'Could not open video file'}), 500
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        for i, timestamp in enumerate(keyframes):
+            try:
+                frame_number = int(timestamp * fps)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+
+                ret, frame = cap.read()
+                if ret:
+                    # Convert to RGB and create thumbnail
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    pil_image = Image.fromarray(frame_rgb)
+                    pil_image.thumbnail((160, 120), Image.Resampling.LANCZOS)
+
+                    # Convert to base64
+                    buffer = io.BytesIO()
+                    pil_image.save(buffer, format='JPEG', quality=85)
+                    buffer.seek(0)
+                    image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+                    extracted_frames.append({
+                        'frame_id': f'frame_{i}',
+                        'timestamp': timestamp,
+                        'image_data': f'data:image/jpeg;base64,{image_base64}',
+                        'width': pil_image.width,
+                        'height': pil_image.height
+                    })
+
+            except Exception as frame_error:
+                logger.warning(f"[{request_id}] Failed to extract frame at {timestamp}s: {str(frame_error)}")
+                continue
+
+        cap.release()
+
+        result = {
+            'success': True,
+            'video_file': video_file,
+            'extracted_frames': extracted_frames,
+            'total_frames': len(extracted_frames),
+            'requested_frames': len(keyframes),
+            'request_id': request_id
+        }
+
+        logger.info(f"[{request_id}] Keyframes extraction successful")
+        logger.info(f"[{request_id}] Extracted {len(extracted_frames)}/{len(keyframes)} frames")
+        logger.info(f"[{request_id}] === KEYFRAMES EXTRACTION REQUEST END ===")
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"[{request_id}] EXCEPTION: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Keyframes extraction error: {str(e)}'}), 500
 
 if __name__ == '__main__':
     print("🚀 Starting InternVideo2.5 Enhanced Web Interface...")

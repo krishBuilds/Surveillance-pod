@@ -831,12 +831,12 @@ class ModelManager:
         return num_frames
     
     def _load_video_for_inference(
-        self, 
-        video_path, 
-        bound=None, 
-        input_size=448, 
-        max_num=1, 
-        num_segments=32, 
+        self,
+        video_path,
+        bound=None,
+        input_size=448,
+        max_num=1,
+        num_segments=32,
         get_frame_by_duration=False,
         fps_sampling=None,
         time_bound=None,
@@ -918,23 +918,17 @@ class ModelManager:
         for frame_index in frame_indices:
             try:
                 img = Image.fromarray(vr[frame_index].asnumpy()).convert("RGB")
-                processed_img = self._dynamic_preprocess(
-                    img, image_size=input_size, use_thumbnail=False, max_num=max_num
-                )
-                
+                # Use original dynamic preprocessing but ensure consistent patch count
+                processed_img = self._dynamic_preprocess(img, min_num=1, max_num=1, image_size=input_size)
+
                 # Add validation for processed image
                 if not processed_img or len(processed_img) == 0:
                     logger.error(f"Dynamic preprocess returned empty result for frame {frame_index}")
                     continue
-                
-                # Ensure we don't exceed max_num (dynamic_preprocess might return more than expected)
-                if len(processed_img) > max_num:
-                    processed_img = processed_img[:max_num]
-                    logger.warning(f"Truncated processed_img to {max_num} tiles for frame {frame_index}")
-                
+
                 logger.debug(f"Frame {frame_index}: {len(processed_img)} tiles processed")
-                
-                # Transform each tile with error handling
+
+                # Transform the tiles with error handling
                 transformed_tiles = []
                 for i, tile in enumerate(processed_img):
                     if tile is None:
@@ -947,17 +941,22 @@ class ModelManager:
                     except Exception as tile_error:
                         logger.error(f"Transform failed for tile {i} in frame {frame_index}: {tile_error}")
                         continue
-                
+
                 if not transformed_tiles:
                     logger.error(f"No valid transformed tiles for frame {frame_index}")
                     continue
-                
+
                 pixel_values = torch.stack(transformed_tiles)
                 if pixel_values is None:
                     logger.error(f"torch.stack returned None for frame {frame_index}")
                     continue
-                
-                num_patches_list.append(pixel_values.shape[0])
+
+                # Always ensure exactly 1 patch per frame for consistency
+                if pixel_values.shape[0] != 1:
+                    # Take only the first patch if multiple were generated
+                    pixel_values = pixel_values[:1]
+
+                num_patches_list.append(1)
                 pixel_values_list.append(pixel_values)
                 
                 # Calculate and store timestamp for this frame
@@ -975,48 +974,52 @@ class ModelManager:
         if not num_patches_list:
             raise RuntimeError("No patches were generated - frame processing failed")
         
-        # Check if all tensors have the same shape before concatenation
+        # Validate tensor shapes - should all be consistent with 1 patch per frame
         first_shape = pixel_values_list[0].shape
-        logger.info(f"First tensor shape: {first_shape}")
-        
+        logger.info(f"First tensor shape: {first_shape} (expected: [1, 3, {input_size}, {input_size}])")
+
+        # Quick validation - all should have exactly 1 patch
         inconsistent_shapes = []
         for i, tensor in enumerate(pixel_values_list):
-            if tensor.shape != first_shape:
+            if tensor.shape[0] != 1 or tensor.shape != first_shape:
                 inconsistent_shapes.append((i, tensor.shape))
-        
+
         if inconsistent_shapes:
             logger.error(f"Inconsistent tensor shapes found:")
             for idx, shape in inconsistent_shapes:
                 logger.error(f"  Frame {idx}: {shape} (expected: {first_shape})")
-            
-            # Try to fix by padding or truncating to the most common shape
-            shape_counts = {}
-            for tensor in pixel_values_list:
-                shape = tensor.shape
-                shape_counts[shape] = shape_counts.get(shape, 0) + 1
-            
-            most_common_shape = max(shape_counts, key=shape_counts.get)
-            logger.info(f"Using most common shape: {most_common_shape}")
-            
-            # Pad or truncate tensors to match the most common shape
+
+            # Force all tensors to have the same shape as the first one
+            logger.info(f"Forcing all tensors to shape: {first_shape}")
             fixed_pixel_values_list = []
             for i, tensor in enumerate(pixel_values_list):
-                if tensor.shape == most_common_shape:
+                if tensor.shape == first_shape:
                     fixed_pixel_values_list.append(tensor)
                 else:
-                    # Pad with zeros if needed
-                    if tensor.shape[0] < most_common_shape[0]:
-                        padding = torch.zeros(most_common_shape[0] - tensor.shape[0], *tensor.shape[1:])
-                        tensor = torch.cat([tensor, padding], dim=0)
-                    else:
-                        # Truncate if needed
-                        tensor = tensor[:most_common_shape[0]]
+                    # Force to first shape by taking or padding
+                    if tensor.shape[0] > 1:
+                        tensor = tensor[:1]  # Take only first patch
+                    elif tensor.shape[0] < 1:
+                        # This shouldn't happen but add safety
+                        tensor = torch.zeros(1, *tensor.shape[1:])
+
+                    # Resize spatial dimensions if needed
+                    if tensor.shape[1:] != first_shape[1:]:
+                        # Use interpolate for spatial resizing
+                        tensor = torch.nn.functional.interpolate(
+                            tensor.unsqueeze(0),
+                            size=first_shape[1:],
+                            mode='bilinear',
+                            align_corners=False
+                        ).squeeze(0)
+
                     fixed_pixel_values_list.append(tensor)
                     logger.info(f"Fixed frame {i} shape from {pixel_values_list[i].shape} to {tensor.shape}")
-            
+
             pixel_values_list = fixed_pixel_values_list
-            # Update num_patches_list to match fixed shapes
-            num_patches_list = [tensor.shape[0] for tensor in pixel_values_list]
+
+        # Final validation - all should have exactly 1 patch
+        num_patches_list = [1] * len(pixel_values_list)
         
         pixel_values = torch.cat(pixel_values_list)
         logger.info(f"Successfully processed {len(pixel_values_list)} frames with {len(num_patches_list)} patches")

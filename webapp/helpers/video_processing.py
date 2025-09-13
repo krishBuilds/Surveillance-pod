@@ -51,7 +51,7 @@ def process_video_segment(model_manager, video_path: str, prompt: str, num_frame
             # Calculate actual frame timestamps based on sampling
             frame_timestamps = []
             for i in range(num_frames):
-                timestamp = start_time + (i / fps_sampling)
+                timestamp = start_time + (i * (1.0 / fps_sampling))
                 if timestamp <= end_time:
                     frame_timestamps.append(timestamp)
             
@@ -110,7 +110,7 @@ def process_temporal_video_segment(model_manager, video_path: str, prompt: str, 
         # Calculate frame timestamps for the model manager to use in temporal analysis
         frame_timestamps = []
         for i in range(num_frames):
-            timestamp = start_time + (i / fps_sampling)
+            timestamp = start_time + (i * (1.0 / fps_sampling))
             if timestamp <= end_time:
                 frame_timestamps.append(timestamp)
 
@@ -119,10 +119,10 @@ def process_temporal_video_segment(model_manager, video_path: str, prompt: str, 
             'do_sample': True,
             'temperature': 0.8,    # Higher temperature for more detailed output
             'max_new_tokens': 1536,  # Increased tokens for more detailed analysis
-            'top_p': 0.9,
+            'top_p': 0.95,         # Increased top_p for more diverse vocabulary and longer output
             'num_beams': 1,
             'repetition_penalty': 1.2,  # Higher penalty to avoid repetition
-            'length_penalty': 1.2     # Encourage longer, more detailed responses
+            'length_penalty': 1.3     # Further increased to encourage longer responses
         }
 
         # Override with provided config or use temporal defaults
@@ -131,25 +131,21 @@ def process_temporal_video_segment(model_manager, video_path: str, prompt: str, 
         # Combine user prompt with temporal instructions
         enhanced_prompt = f"""{prompt}
 
-ENHANCED TEMPORAL ANALYSIS REQUIREMENTS:
-- Analyze this video segment from {start_time:.1f}s to {end_time:.1f}s with high granularity
-- Include specific timestamps for EVERY distinct action and event (minimum 6-8 timestamped events per chunk)
-- Provide detailed chronological timeline with precise timing
-- Capture micro-actions: hand movements, body posture changes, object interactions, facial expressions
-- Note when activities start, pause, resume, and end
-- Include transition moments between major actions
+FOCUS ON TIMESTAMPS AND EVENTS:
+- Analyze the COMPLETE video segment from {start_time:.1f}s to {end_time:.1f}s ({end_time-start_time:.1f}s duration)
+- YOU MUST provide specific timestamps for ALL events and actions throughout the entire duration
+- Include detailed timing information - when each event starts, what happens, and when it ends
+- Cover the full time span with evenly distributed timestamps from beginning to end
+- Document every visible activity, movement, interaction, and significant change with precise timing
+- Focus on comprehensive event coverage with timestamps for early, middle, and late periods
 
-Required format examples:
-- At 0.0s: [person/action enters frame]
-- Around 1.2s: [specific hand movement or object interaction]
-- At 2.5s: [body position change or significant action]
-- From 3.0s to 5.2s: [continuous activity description]
-- Around 6.8s: [transition or new action begins]
-- At 8.1s: [detailed object manipulation or interaction]
-- From 10.3s to 12.7s: [extended activity with details]
-- Around 15.0s: [concluding action or preparation to exit]
+TIMESTAMP REQUIREMENTS:
+- Use specific timestamp format: "At X.Xs:", "Around X.Xs:", "From X.Xs to Y.Ys:"
+- Provide multiple timestamped events throughout the entire {end_time-start_time:.1f}s duration
+- Ensure continuous time coverage with no significant gaps in event documentation
+- Include timing for all major actions, transitions, and notable changes
 
-Break down the timeline into 2-3 second intervals and document all observable changes."""
+Output: Detailed chronological description with comprehensive timestamps covering ALL events in the complete time segment."""
 
         result = process_video_segment(
             model_manager=model_manager,

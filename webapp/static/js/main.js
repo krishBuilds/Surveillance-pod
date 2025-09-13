@@ -41,6 +41,843 @@ function showNotification(message, type = 'info', duration = 5000) {
     }, duration);
 }
 
+// Timeline functions
+let timeline = null;
+let currentVideoData = null;
+let currentCaptionData = null;
+
+// Setup timeline video player
+function setupTimelineVideoPlayer() {
+    const timelineVideoPlayer = document.getElementById('timeline-video-player');
+    const videoPlayer = document.getElementById('video-player');
+
+    if (timelineVideoPlayer && videoPlayer && videoPlayer.src) {
+        // Copy the source from main video player to timeline video player
+        timelineVideoPlayer.src = videoPlayer.src;
+        timelineVideoPlayer.load();
+    }
+}
+
+async function showTimeline() {
+    if (!currentCaptionData || currentCaptionData.length === 0) {
+        showNotification('No caption data available for timeline generation. Please generate captions first.', 'warning');
+        return;
+    }
+
+    // Hide chunks view and show timeline view
+    const captionResults = document.getElementById('caption-results');
+    const timelineView = document.getElementById('timeline-view');
+
+    if (captionResults) captionResults.classList.add('hidden');
+    if (timelineView) timelineView.classList.remove('hidden');
+
+    // Initialize timeline if not already created
+    if (!timeline) {
+        initializeTimeline();
+    }
+
+    // Show loading state
+    showNotification('Generating timeline...', 'info');
+
+    try {
+        // Try API-based timeline generation first (enhanced)
+        try {
+            const apiEvents = await generateAPITimeline();
+            if (apiEvents && apiEvents.length > 0) {
+                showNotification(`Enhanced timeline generated with ${apiEvents.length} events`, 'success');
+                return;
+            }
+        } catch (apiError) {
+            console.warn('API timeline generation failed, falling back to direct UI:', apiError);
+        }
+
+        // Fallback to simple timeline generation
+        const events = generateSimpleTimeline();
+        if (events && events.length > 0) {
+            showNotification(`Timeline generated with ${events.length} events`, 'success');
+        } else {
+            showNotification('No events could be generated from caption data', 'warning');
+        }
+
+        // Ensure timeline container is visible
+        const container = document.getElementById('video-timeline-container');
+        if (container) {
+            container.style.display = 'block';
+        }
+    } catch (error) {
+        console.error('Timeline generation failed:', error);
+        showNotification('Failed to generate timeline', 'error');
+    }
+
+    // Set up video player integration if available
+    setupVideoPlayerIntegration();
+}
+
+async function generateEnhancedTimeline() {
+    if (!currentCaptionData || !currentVideoData) {
+        throw new Error('No caption or video data available');
+    }
+
+    showNotification('Generating enhanced timeline with AI...', 'info');
+
+    // Prepare data for GPT-4o mini processing
+    const captions = currentCaptionData.map(chunk => ({
+        chunk_id: chunk.chunk_id || 1,
+        start_time: chunk.start_time || 0,
+        end_time: chunk.end_time || (chunk.start_time || 0) + 30,
+        caption: chunk.caption || ''
+    }));
+
+    const videoInfo = {
+        filename: currentVideoData.filename || 'unknown',
+        duration: currentVideoData.duration || 0,
+        fps_sampling: currentVideoData.fps_used || 3.0,
+        processing_mode: currentVideoData.processing_mode || 'temporal_analysis'
+    };
+
+    const response = await fetch('/generate-timeline', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            video_file: currentVideoData.filename,
+            captions: captions,
+            video_info: videoInfo,
+            total_duration: currentVideoData.duration || 0
+        })
+    });
+
+    if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Timeline generation failed');
+    }
+
+    const result = await response.json();
+
+    if (result.success && result.timeline_data) {
+        // Use the structured timeline data from GPT-4o mini
+        const videoDuration = currentVideoData ? currentVideoData.duration || 0 : 0;
+        timeline.setEvents(result.timeline_data, videoDuration);
+        updateTimelineStats(result.timeline_data.events || [], videoDuration);
+
+        // Store key frames and thumbnail suggestions for later use
+        if (result.key_frames) {
+            currentVideoData.key_frames = result.key_frames;
+        }
+        if (result.thumbnail_suggestions) {
+            currentVideoData.thumbnail_suggestions = result.thumbnail_suggestions;
+        }
+
+        // Automatically extract thumbnails for significant events
+        if (currentVideoData.filename && result.total_events > 0) {
+            setTimeout(() => {
+                timeline.extractThumbnailsForEvents(currentVideoData.filename);
+            }, 1000); // Delay to allow timeline to render first
+        }
+
+        showNotification(`Generated ${result.total_events} timeline events with AI`, 'success');
+    } else {
+        throw new Error('Invalid timeline data received');
+    }
+}
+
+function parseTimelineFromCaptions(captionData) {
+    // Basic fallback timeline parsing from caption text
+    const events = [];
+
+    if (!captionData || !Array.isArray(captionData)) {
+        return events;
+    }
+
+    captionData.forEach(chunk => {
+        if (chunk.caption) {
+            // Extract timestamp patterns from caption text
+            const timestampRegex = /(At|Around|From)\s+(\d+(?:\.\d+)?)s(?:(?:\s+to\s+|\s*-\s*)(\d+(?:\.\d+)?)s?)?/gi;
+            let match;
+
+            while ((match = timestampRegex.exec(chunk.caption)) !== null) {
+                const startTimestamp = parseFloat(match[2]);
+                const endTimestamp = match[3] ? parseFloat(match[3]) : startTimestamp + 2;
+
+                events.push({
+                    timestamp: startTimestamp,
+                    duration: endTimestamp - startTimestamp,
+                    title: `Event at ${startTimestamp.toFixed(1)}s`,
+                    description: chunk.caption.substring(0, 100) + '...',
+                    category: 'action',
+                    confidence: 0.7,
+                    visualSignificance: 5
+                });
+            }
+
+            // If no timestamps found, create a general event for the chunk
+            if (events.length === 0) {
+                events.push({
+                    timestamp: chunk.start_time || 0,
+                    duration: (chunk.end_time || (chunk.start_time || 0) + 30) - (chunk.start_time || 0),
+                    title: `Activity in chunk ${chunk.chunk_id || 1}`,
+                    description: chunk.caption.substring(0, 100) + '...',
+                    category: 'action',
+                    confidence: 0.6,
+                    visualSignificance: 4
+                });
+            }
+        }
+    });
+
+    return events.sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function toggleTimelineView() {
+    const timelineView = document.getElementById('timeline-view');
+    const captionResults = document.getElementById('caption-results');
+
+    if (timelineView.classList.contains('hidden')) {
+        showTimeline();
+    } else {
+        timelineView.classList.add('hidden');
+        captionResults.classList.remove('hidden');
+    }
+}
+
+function initializeTimeline() {
+    const container = document.getElementById('video-timeline-container');
+    if (!container) {
+        console.error('Timeline container not found');
+        return;
+    }
+
+    // VideoTimeline class will be initialized when needed
+    if (typeof VideoTimeline === 'undefined') {
+        // Will use fallback UI method when timeline is generated
+        return;
+    }
+
+    try {
+        timeline = new VideoTimeline('video-timeline-container', {
+            theme: 'light',
+            animate: true,
+            lineColor: '#3498db',
+            dotColor: '#3498db',
+            showThumbnails: true,
+            thumbnailSize: 60,
+            dateFormat: 'ss.SS'
+        });
+
+        // Listen for timeline seek events
+        container.addEventListener('timelineSeek', (event) => {
+            const timestamp = event.detail.timestamp;
+            seekVideoToTimestamp(timestamp);
+        });
+
+        // Listen for timeline play events
+        container.addEventListener('timelinePlay', (event) => {
+            const timestamp = event.detail.timestamp;
+            playVideoFromTimestamp(timestamp);
+        });
+
+        console.log('VideoTimeline initialized successfully');
+    } catch (error) {
+        console.error('Failed to initialize VideoTimeline:', error);
+        timeline = null; // Reset to force fallback
+    }
+}
+
+function updateTimelineStats(events, videoDuration) {
+    const eventCount = document.getElementById('timeline-event-count');
+    const durationBadge = document.getElementById('timeline-duration');
+
+    if (eventCount) {
+        eventCount.textContent = `${events.length} events`;
+    }
+
+    if (durationBadge) {
+        const totalDuration = events.reduce((sum, event) => sum + event.duration, 0);
+        durationBadge.textContent = `${totalDuration.toFixed(1)}s total`;
+    }
+
+    // Update timeline time display
+    const timelineTime = document.getElementById('timeline-time');
+    if (timelineTime) {
+        timelineTime.textContent = `0.0s / ${videoDuration.toFixed(1)}s`;
+    }
+}
+
+function setupVideoPlayerIntegration() {
+    const videoPlayer = document.getElementById('video-player');
+    if (!videoPlayer) return;
+
+    // Update timeline progress as video plays
+    videoPlayer.addEventListener('timeupdate', () => {
+        if (timeline) {
+            timeline.updateProgress(videoPlayer.currentTime);
+            updateTimelineProgress(videoPlayer.currentTime, videoPlayer.duration);
+        }
+    });
+
+    // Set video duration when metadata loads
+    videoPlayer.addEventListener('loadedmetadata', () => {
+        if (timeline) {
+            timeline.setVideoDuration(videoPlayer.duration);
+            updateTimelineStats(timeline.events, videoPlayer.duration);
+        }
+    });
+}
+
+function updateTimelineProgress(currentTime, duration) {
+    const progressBar = document.getElementById('timeline-progress');
+    const timelineTime = document.getElementById('timeline-time');
+
+    if (progressBar && duration > 0) {
+        const progress = (currentTime / duration) * 100;
+        progressBar.style.width = `${progress}%`;
+    }
+
+    if (timelineTime && duration > 0) {
+        timelineTime.textContent = `${currentTime.toFixed(1)}s / ${duration.toFixed(1)}s`;
+    }
+}
+
+// Simplified timeline generation that always works
+function generateSimpleTimeline() {
+    if (!currentCaptionData || currentCaptionData.length === 0) {
+        showNotification('No caption data available', 'warning');
+        return;
+    }
+
+    // Create timeline events directly from chunks with exact timestamps
+    const events = currentCaptionData.map(chunk => {
+        const startTime = parseFloat(chunk.start_time) || 0;
+        const endTime = parseFloat(chunk.end_time) || (startTime + 30);
+        const duration = endTime - startTime;
+
+        // Extract a meaningful title from the caption (first sentence or first few words)
+        const caption = chunk.caption || 'No caption available';
+        const title = caption.length > 50 ? caption.substring(0, 50) + '...' : caption;
+
+        return {
+            timestamp: startTime,
+            duration: duration,
+            title: title,
+            description: caption,
+            type: 'action',
+            confidence: 0.7
+        };
+    });
+
+    const videoDuration = currentVideoData ? parseFloat(currentVideoData.duration) || 0 : 0;
+
+    // Always use VideoTimeline component for caption page
+    if (typeof VideoTimeline === 'undefined') {
+        throw new Error('VideoTimeline component not available');
+    }
+
+    const container = document.getElementById('video-timeline-container');
+    if (!timeline) {
+        timeline = new VideoTimeline('video-timeline-container', {
+            theme: 'light',
+            animate: true,
+            lineColor: '#4f46e5',
+            dotColor: '#7c3aed',
+            showThumbnails: true,
+            thumbnailSize: 60,
+            dateFormat: 'ss.SS'
+        });
+
+        // Add video seek functionality to the timeline
+        if (timeline.seekToVideo) {
+            timeline.seekToVideo = (timestamp) => {
+                seekVideoToTimestamp(timestamp);
+            };
+        }
+    }
+
+    timeline.setEvents(events, videoDuration);
+
+    // Auto-extract frames for the first few events
+    setTimeout(async () => {
+        if (currentVideoData?.filename) {
+            try {
+                await extractFramesForTimeline(events);
+                console.log('Frames extracted successfully for timeline');
+            } catch (error) {
+                console.warn('Auto frame extraction failed:', error);
+            }
+        }
+    }, 1000);
+
+    showNotification(`Timeline generated with ${events.length} events`, 'success');
+
+    return events;
+}
+
+// API-based timeline generation for enhanced functionality
+async function generateAPITimeline() {
+    if (!currentCaptionData || !currentVideoData) {
+        throw new Error('No caption or video data available');
+    }
+
+    showNotification('Generating enhanced timeline via API...', 'info');
+
+    // Prepare data for API
+    const captions = currentCaptionData.map(chunk => ({
+        chunk_id: chunk.chunk_id || 1,
+        start_time: chunk.start_time || 0,
+        end_time: chunk.end_time || (chunk.start_time || 0) + 30,
+        caption: chunk.caption || ''
+    }));
+
+    const videoInfo = {
+        filename: currentVideoData.filename || 'unknown',
+        duration: currentVideoData.duration || 0,
+        fps_sampling: currentVideoData.fps_used || 3.0,
+        processing_mode: currentVideoData.processing_mode || 'temporal_analysis'
+    };
+
+    try {
+        const response = await fetch('/generate-timeline', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                video_file: currentVideoData.filename,
+                captions: captions,
+                video_info: videoInfo,
+                total_duration: currentVideoData.duration || 0
+            })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Timeline generation failed');
+        }
+
+        const result = await response.json();
+
+        console.log('API Timeline Response:', result);
+
+        if (result.success && result.timeline_data && result.timeline_data.events) {
+            // Transform API events to timeline format - preserve exact GPT timestamps
+            const timelineEvents = result.timeline_data.events.map(event => ({
+                timestamp: parseFloat(event.start_time) || 0, // Use exact start_time from GPT
+                duration: parseFloat(event.duration) || (parseFloat(event.end_time) || 0) - (parseFloat(event.start_time) || 0),
+                title: event.title || 'Event',
+                description: event.description || '',
+                type: event.category || 'action', // Use category from GPT response
+                confidence: parseFloat(event.confidence) || 0.8,
+                thumbnail: event.thumbnail || null
+            }));
+
+            // Always use VideoTimeline component for caption page
+            const container = document.getElementById('video-timeline-container');
+            if (typeof VideoTimeline === 'undefined') {
+                throw new Error('VideoTimeline component not available');
+            }
+
+            if (!timeline) {
+                timeline = new VideoTimeline('video-timeline-container', {
+                    theme: 'light',
+                    animate: true,
+                    lineColor: '#4f46e5',
+                    dotColor: '#7c3aed',
+                    showThumbnails: true,
+                    thumbnailSize: 60,
+                    dateFormat: 'ss.SS'
+                });
+
+                // Add video seek functionality to the timeline
+                if (timeline.seekToVideo) {
+                    timeline.seekToVideo = (timestamp) => {
+                        seekVideoToTimestamp(timestamp);
+                    };
+                }
+            }
+
+            timeline.setEvents(timelineEvents, currentVideoData.duration || 0);
+
+            // Auto-extract frames for the first few events
+            setTimeout(async () => {
+                if (currentVideoData?.filename) {
+                    try {
+                        await extractFramesForTimeline(timelineEvents);
+                        console.log('Frames extracted successfully for API timeline');
+                    } catch (error) {
+                        console.warn('Auto frame extraction failed:', error);
+                    }
+                }
+            }, 1000);
+
+            showNotification(`Timeline generated with ${timelineEvents.length} events`, 'success');
+            return timelineEvents;
+        }
+
+        throw new Error('Invalid timeline response format');
+    } catch (error) {
+        console.warn('API timeline generation failed:', error);
+        throw error; // Re-throw to trigger fallback
+    }
+}
+
+// Clean, minimal timeline UI for caption page
+function createDirectTimelineUI(events, videoDuration) {
+    const container = document.getElementById('video-timeline-container');
+    if (!container) {
+        console.error('Timeline container not found');
+        return;
+    }
+
+    // Clear container
+    container.innerHTML = '';
+
+    // Create minimal timeline structure
+    const timelineHTML = `
+        <div class="minimal-timeline" style="max-width: 400px; margin: 0 auto; padding: 10px;">
+            <!-- Compact Header -->
+            <div style="text-align: center; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: 600; color: #374151;">
+                    ${events.length} events • ${videoDuration.toFixed(1)}s
+                </div>
+            </div>
+
+            <!-- Vertical Timeline -->
+            <div style="position: relative; padding-left: 25px;">
+                <!-- Timeline Line -->
+                <div style="position: absolute; left: 8px; top: 0; bottom: 0; width: 1px; background: #d1d5db;"></div>
+
+                ${events.map((event, index) => {
+                    const middleFrameTime = event.timestamp + (event.duration / 2);
+                    return `
+                        <div class="timeline-event" style="position: relative; margin-bottom: 12px;" data-timestamp="${event.timestamp}">
+                            <!-- Simple Timeline Node -->
+                            <div style="
+                                position: absolute;
+                                left: -20px;
+                                top: 4px;
+                                width: 8px;
+                                height: 8px;
+                                background: #4f46e5;
+                                border-radius: 50%;
+                                border: 1px solid white;
+                                cursor: pointer;
+                            " onclick="seekVideoToTimestamp(${event.timestamp})"></div>
+
+                            <!-- Minimal Event Card -->
+                            <div style="
+                                background: white;
+                                border: 1px solid #e5e7eb;
+                                border-radius: 6px;
+                                padding: 8px 10px;
+                                margin-left: 10px;
+                                cursor: pointer;
+                                transition: all 0.2s ease;
+                                font-size: 12px;
+                            " onclick="seekVideoToTimestamp(${event.timestamp})">
+                                <!-- Time and Description -->
+                                <div style="display: flex; align-items: flex-start; gap: 8px;">
+                                    <span style="color: #6b7280; font-weight: 500; white-space: nowrap;">
+                                        ${event.timestamp.toFixed(1)}s
+                                    </span>
+                                    <span style="color: #374151; flex: 1; line-height: 1.3;">
+                                        ${event.description.length > 80 ? event.description.substring(0, 80) + '...' : event.description}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        </div>
+    `;
+
+    container.innerHTML = timelineHTML;
+
+    // Add minimal hover effect
+    container.querySelectorAll('.timeline-event > div:last-child').forEach(card => {
+        card.addEventListener('mouseenter', () => {
+            card.style.backgroundColor = '#f9fafb';
+            card.style.borderColor = '#4f46e5';
+        });
+
+        card.addEventListener('mouseleave', () => {
+            card.style.backgroundColor = 'white';
+            card.style.borderColor = '#e5e7eb';
+        });
+    });
+
+    // Auto-extract frames for timeline thumbnails
+    setTimeout(() => {
+        extractFramesForTimeline(events);
+    }, 500);
+}
+
+
+function seekVideoToTimestamp(timestamp) {
+    const videoPlayer = document.getElementById('video-player');
+    if (videoPlayer) {
+        videoPlayer.currentTime = timestamp;
+        videoPlayer.play();
+    } else {
+        showNotification(`Seeking to ${timestamp.toFixed(1)}s`, 'info');
+    }
+}
+
+function playVideoFromTimestamp(timestamp) {
+    // Try to find and use any available video player
+    let videoPlayer = document.getElementById('video-player');
+
+    // If main video player is not available or hidden, try the preview player
+    if (!videoPlayer || videoPlayer.offsetParent === null) {
+        videoPlayer = document.getElementById('caption-preview-player');
+    }
+
+    if (videoPlayer) {
+        // Ensure the video has a source loaded
+        if (!videoPlayer.src && currentVideoData?.filename) {
+            // Load the video source if not already loaded
+            videoPlayer.src = `/serve-video/${currentVideoData.filename}`;
+        }
+
+        // Show the video preview section if it's hidden
+        const videoPreview = document.getElementById('video-preview');
+        if (videoPreview && videoPreview.classList.contains('hidden')) {
+            videoPreview.classList.remove('hidden');
+            // Hide timeline view temporarily
+            const timelineView = document.getElementById('timeline-view');
+            if (timelineView) {
+                timelineView.classList.add('hidden');
+            }
+            // Show caption results
+            const captionResults = document.getElementById('caption-results');
+            if (captionResults) {
+                captionResults.classList.remove('hidden');
+            }
+        }
+
+        videoPlayer.currentTime = timestamp;
+        videoPlayer.play()
+            .then(() => {
+                console.log(`▶️ Playing video from ${timestamp.toFixed(1)}s`);
+                showNotification(`Playing from ${timestamp.toFixed(1)}s`, 'success', 2000);
+            })
+            .catch((error) => {
+                console.warn('Video play failed:', error);
+                showNotification(`Seeked to ${timestamp.toFixed(1)}s`, 'info', 2000);
+            });
+    } else {
+        showNotification(`No video player available for ${timestamp.toFixed(1)}s`, 'warning');
+    }
+}
+
+function formatTime(seconds) {
+    if (!seconds || seconds < 0) return '0.0s';
+    const secs = Math.floor(seconds);
+    const ms = Math.round((seconds - secs) * 100);
+    return `${secs}.${ms.toString().padStart(2, '0')}s`;
+}
+
+async function extractFramesForTimeline(events) {
+    if (!events || !currentVideoData?.filename) {
+        return;
+    }
+
+    console.log('🖼️ Extracting frames for timeline events...');
+
+    // Extract frames for each timeline event
+    for (let i = 0; i < Math.min(events.length, 10); i++) { // Limit to first 10 events
+        const event = events[i];
+        const frameTime = event.timestamp + (event.duration / 2); // Middle frame
+
+        try {
+            const frameUrl = await extractFrameAtTime(currentVideoData.filename, frameTime);
+
+            // Find the timeline event and update it with the frame
+            const timelineEvent = document.querySelector(`[data-timestamp="${event.timestamp}"]`);
+            if (timelineEvent) {
+                // Find the frame container and update it
+                const frameContainer = timelineEvent.querySelector('.timeline-frame-container.placeholder');
+
+                if (frameContainer) {
+                    // Replace placeholder with actual frame
+                    frameContainer.classList.remove('placeholder');
+                    frameContainer.innerHTML = `
+                        <img src="${frameUrl}"
+                             alt="Frame at ${formatTime(event.timestamp)}"
+                             class="timeline-frame-image"
+                             onclick="timeline.seekToVideo(${event.timestamp})"
+                             title="Click to seek to ${formatTime(event.timestamp)}" />
+                        <div class="frame-time-overlay">${formatTime(event.timestamp)}</div>
+                        <div class="frame-play-overlay" onclick="event.stopPropagation(); timeline.playFromTimestamp(${event.timestamp})" title="Play from this moment">
+                            <i class="bi bi-play-fill"></i>
+                        </div>
+                    `;
+
+                    console.log(`✅ Frame extracted for event at ${frameTime.toFixed(1)}s`);
+                }
+            }
+        } catch (error) {
+            console.warn(`❌ Failed to extract frame for event at ${frameTime}s:`, error);
+        }
+    }
+}
+
+async function extractFrameAtTime(videoFilename, timestamp) {
+    try {
+        const response = await fetch('/extract-frame', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                video_file: videoFilename,
+                timestamp: timestamp
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Frame extraction failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (data.success && data.image_data) {
+            return data.image_data;
+        } else {
+            throw new Error(data.error || 'No frame data returned');
+        }
+    } catch (error) {
+        console.error('Frame extraction error:', error);
+        throw error;
+    }
+}
+
+async function extractTimelineThumbnails() {
+    if (!timeline || !timeline.events || !currentVideoData?.filename) {
+        showNotification('No timeline data or video file available', 'warning');
+        return;
+    }
+
+    await timeline.extractThumbnailsForEvents(currentVideoData.filename);
+}
+
+async function extractAllKeyframes() {
+    if (!timeline || !timeline.events || !currentVideoData?.filename) {
+        showNotification('No timeline data or video file available', 'warning');
+        return;
+    }
+
+    showNotification('Extracting all key frames...', 'info');
+
+    try {
+        const keyFrames = await timeline.extractKeyFramesForEvents(timeline.events, currentVideoData.filename);
+
+        if (keyFrames.length > 0) {
+            // Store key frames for later use
+            if (!currentVideoData.extracted_keyframes) {
+                currentVideoData.extracted_keyframes = [];
+            }
+            currentVideoData.extracted_keyframes.push(...keyFrames);
+
+            showNotification(`Extracted ${keyFrames.length} key frames successfully`, 'success');
+
+            // Optionally create a downloadable gallery
+            if (confirm('Would you like to download the key frames gallery?')) {
+                downloadKeyFramesGallery(keyFrames);
+            }
+        } else {
+            showNotification('No key frames found to extract', 'info');
+        }
+    } catch (error) {
+        console.error('Error extracting key frames:', error);
+        showNotification('Failed to extract key frames', 'error');
+    }
+}
+
+function downloadKeyFramesGallery(keyFrames) {
+    if (!keyFrames.length) return;
+
+    // Create HTML gallery
+    let html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Key Frames Gallery - ${currentVideoData?.filename || 'Video'}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; }
+        .frame-card { background: white; border-radius: 8px; padding: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .frame-image { width: 100%; height: 120px; object-fit: cover; border-radius: 4px; }
+        .frame-info { margin-top: 8px; font-size: 0.9rem; }
+        .timestamp { font-weight: bold; color: #007bff; }
+    </style>
+</head>
+<body>
+    <h1>Key Frames Gallery</h1>
+    <p><strong>Video:</strong> ${currentVideoData?.filename || 'Unknown'}</p>
+    <p><strong>Total Frames:</strong> ${keyFrames.length}</p>
+    <div class="gallery">
+`;
+
+    keyFrames.forEach((frame, index) => {
+        html += `
+        <div class="frame-card">
+            <img src="${frame.image_data}" alt="Frame at ${frame.timestamp}s" class="frame-image">
+            <div class="frame-info">
+                <div class="timestamp">${formatTime(frame.timestamp)}</div>
+                <div>Frame ${index + 1}</div>
+            </div>
+        </div>
+    `;
+    });
+
+    html += `
+    </div>
+</body>
+</html>`;
+
+    // Download the HTML file
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `keyframes_gallery_${currentVideoData?.filename || 'video'}_${Date.now()}.html`;
+    link.click();
+    URL.revokeObjectURL(url);
+}
+
+function exportTimeline() {
+    if (!timeline || !timeline.events) {
+        showNotification('No timeline data to export', 'warning');
+        return;
+    }
+
+    const timelineData = {
+        video_file: currentVideoData?.filename || 'unknown',
+        duration: currentVideoData?.duration || 0,
+        events: timeline.events,
+        totalEvents: timeline.events.length,
+        totalDuration: timeline.events.reduce((sum, event) => sum + event.duration, 0),
+        generated_at: new Date().toISOString(),
+        ai_enhanced: !!currentVideoData?.key_frames,
+        key_frames_count: currentVideoData?.key_frames?.length || 0,
+        thumbnail_suggestions: currentVideoData?.thumbnail_suggestions || []
+    };
+
+    const dataStr = JSON.stringify(timelineData, null, 2);
+    const dataBlob = new Blob([dataStr], { type: 'application/json' });
+
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(dataBlob);
+    link.download = `timeline_${currentVideoData?.filename || 'video'}_${Date.now()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
+    showNotification('Timeline exported successfully', 'success');
+}
+
 class SurveillanceApp {
     constructor() {
         this.init();
@@ -108,6 +945,9 @@ class SurveillanceApp {
             case 'analysis':
                 this.loadAnalysisPage();
                 break;
+            case 'timeline':
+                this.loadTimelinePage();
+                break;
         }
     }
 
@@ -140,7 +980,20 @@ class SurveillanceApp {
         // Initialize analysis functionality
         console.log('Analysis page loaded');
         this.setupAnalysisPage();
-        
+
+        // Setup video preview functionality
+        setTimeout(() => {
+            if (window.setupVideoPreview) {
+                window.setupVideoPreview();
+            }
+        }, 100);
+    }
+
+    loadTimelinePage() {
+        // Initialize timeline functionality
+        console.log('Timeline page loaded');
+        this.setupTimelinePage();
+
         // Setup video preview functionality
         setTimeout(() => {
             if (window.setupVideoPreview) {
@@ -156,7 +1009,8 @@ class SurveillanceApp {
         // Setup event listeners
         const videoSelector = document.getElementById('video-selector');
         const analyzeBtn = document.getElementById('analyze-chunks-btn');
-        
+        const timelineBtn = document.getElementById('show-timeline-btn');
+
         if (videoSelector) {
             videoSelector.addEventListener('change', async (e) => {
                 const videoFile = e.target.value;
@@ -176,6 +1030,7 @@ class SurveillanceApp {
 
                         if (analyzeBtn) analyzeBtn.disabled = false;
                         if (temporalBtn) temporalBtn.disabled = false;
+                        if (timelineBtn) timelineBtn.disabled = false;
                     } catch (error) {
                         console.error('❌ Error in video selector change handler:', error);
                     }
@@ -183,6 +1038,7 @@ class SurveillanceApp {
                     this.hideVideoInfoDisplay();
                     if (analyzeBtn) analyzeBtn.disabled = true;
                     if (temporalBtn) temporalBtn.disabled = true;
+                    if (timelineBtn) timelineBtn.disabled = true;
                 }
             });
         }
@@ -209,13 +1065,200 @@ class SurveillanceApp {
                 const query = document.getElementById('chunk-query')?.value?.trim();
                 const startTime = parseFloat(document.getElementById('temporal-start-time')?.value) || 0;
                 const endTime = parseFloat(document.getElementById('temporal-end-time')?.value) || 0;
-                
+
                 if (videoFile && query && startTime >= 0 && endTime > startTime) {
                     await this.performTemporalAnalysis(videoFile, query, startTime, endTime);
                 } else {
                     showNotification('❌ Please fill in query and valid time range', 'error', 3000);
                 }
             });
+        }
+
+        // Timeline button
+        if (timelineBtn) {
+            timelineBtn.addEventListener('click', async () => {
+                const videoFile = videoSelector?.value;
+                if (videoFile) {
+                    await this.showTimelineForAnalysis(videoFile);
+                } else {
+                    showNotification('Please select a video first', 'error');
+                }
+            });
+        }
+    }
+
+    async setupTimelinePage() {
+        // Load processed videos for timeline generation
+        await this.loadProcessedVideosForTimeline();
+
+        // Setup event listeners
+        const videoSelector = document.getElementById('timeline-video-selector');
+        const generateBtn = document.getElementById('generate-timeline-btn');
+        const viewExistingBtn = document.getElementById('view-existing-timeline-btn');
+
+        if (videoSelector) {
+            videoSelector.addEventListener('change', async (e) => {
+                const videoFile = e.target.value;
+                if (videoFile) {
+                    await this.loadTimelineVideoInfo(videoFile);
+                    generateBtn.disabled = false;
+                    viewExistingBtn.disabled = false;
+                } else {
+                    generateBtn.disabled = true;
+                    viewExistingBtn.disabled = true;
+                }
+            });
+        }
+
+        if (generateBtn) {
+            generateBtn.addEventListener('click', async () => {
+                const videoFile = videoSelector?.value;
+                if (videoFile) {
+                    await this.generateTimeline(videoFile);
+                }
+            });
+        }
+
+        if (viewExistingBtn) {
+            viewExistingBtn.addEventListener('click', async () => {
+                const videoFile = videoSelector?.value;
+                if (videoFile) {
+                    await this.viewExistingTimeline(videoFile);
+                }
+            });
+        }
+    }
+
+    async loadProcessedVideosForTimeline() {
+        try {
+            const response = await fetch('/api/videos/processed');
+            const data = await response.json();
+
+            if (data.success && data.videos) {
+                const selector = document.getElementById('timeline-video-selector');
+                if (selector) {
+                    selector.innerHTML = '<option value="">Choose a processed video...</option>';
+                    data.videos.forEach(video => {
+                        const option = document.createElement('option');
+                        option.value = video.filename;
+                        option.textContent = `${video.filename} (${video.chunks} chunks, ${video.duration}s)`;
+                        selector.appendChild(option);
+                    });
+                }
+            }
+        } catch (error) {
+            console.error('Error loading processed videos for timeline:', error);
+            showNotification('Failed to load processed videos', 'error');
+        }
+    }
+
+    async loadTimelineVideoInfo(videoFile) {
+        try {
+            const response = await fetch(`/api/video-caption/${encodeURIComponent(videoFile)}`);
+            const data = await response.json();
+
+            if (data.success && data.caption) {
+                const infoDiv = document.getElementById('timeline-video-info');
+                if (infoDiv) {
+                    const chunks = data.caption.chunks ? data.caption.chunks.length : 0;
+                    const duration = data.caption.video_duration || 0;
+
+                    document.getElementById('timeline-chunks-display').textContent = chunks;
+                    document.getElementById('timeline-duration-display').textContent = `${duration.toFixed(1)}s`;
+
+                    infoDiv.classList.remove('hidden');
+                }
+            }
+        } catch (error) {
+            console.error('Error loading timeline video info:', error);
+        }
+    }
+
+    async generateTimeline(videoFile) {
+        try {
+            showNotification('Generating timeline...', 'info');
+
+            // Show loading state
+            const loadingDiv = document.getElementById('timeline-loading');
+            const controlsDiv = document.getElementById('timeline-controls');
+            const emptyDiv = document.getElementById('timeline-empty-state');
+
+            if (loadingDiv) loadingDiv.classList.remove('hidden');
+            if (controlsDiv) controlsDiv.classList.add('hidden');
+            if (emptyDiv) emptyDiv.classList.add('hidden');
+
+            // Get timeline options
+            const enhanced = document.getElementById('enhanced-timeline')?.checked || false;
+            const autoExtract = document.getElementById('auto-extract-thumbnails')?.checked || false;
+
+            // Fetch caption data
+            const response = await fetch(`/api/video-caption/${encodeURIComponent(videoFile)}`);
+            const data = await response.json();
+
+            if (data.success && data.caption) {
+                // Initialize timeline component
+                if (window.VideoTimeline) {
+                    await window.VideoTimeline.generateTimeline(data.caption, {
+                        enhanced: enhanced,
+                        autoExtractThumbnails: autoExtract,
+                        videoFile: videoFile
+                    });
+
+                    // Show timeline controls
+                    if (loadingDiv) loadingDiv.classList.add('hidden');
+                    if (controlsDiv) controlsDiv.classList.remove('hidden');
+
+                    showNotification('Timeline generated successfully', 'success');
+                } else {
+                    showNotification('Timeline component not available', 'error');
+                }
+            } else {
+                showNotification('No caption data found for this video', 'error');
+            }
+        } catch (error) {
+            console.error('Error generating timeline:', error);
+            showNotification(`Failed to generate timeline: ${error.message}`, 'error');
+        }
+    }
+
+    async viewExistingTimeline(videoFile) {
+        try {
+            showNotification('Loading existing timeline...', 'info');
+
+            // Show loading state
+            const loadingDiv = document.getElementById('timeline-loading');
+            const controlsDiv = document.getElementById('timeline-controls');
+            const emptyDiv = document.getElementById('timeline-empty-state');
+
+            if (loadingDiv) loadingDiv.classList.remove('hidden');
+            if (controlsDiv) controlsDiv.classList.add('hidden');
+            if (emptyDiv) emptyDiv.classList.add('hidden');
+
+            // Fetch caption data
+            const response = await fetch(`/api/video-caption/${encodeURIComponent(videoFile)}`);
+            const data = await response.json();
+
+            if (data.success && data.caption) {
+                // Initialize timeline component with existing data
+                if (window.VideoTimeline) {
+                    await window.VideoTimeline.loadExistingTimeline(data.caption, {
+                        videoFile: videoFile
+                    });
+
+                    // Show timeline controls
+                    if (loadingDiv) loadingDiv.classList.add('hidden');
+                    if (controlsDiv) controlsDiv.classList.remove('hidden');
+
+                    showNotification('Timeline loaded successfully', 'success');
+                } else {
+                    showNotification('Timeline component not available', 'error');
+                }
+            } else {
+                showNotification('No existing timeline found for this video', 'error');
+            }
+        } catch (error) {
+            console.error('Error loading existing timeline:', error);
+            showNotification(`Failed to load timeline: ${error.message}`, 'error');
         }
     }
 
@@ -667,6 +1710,83 @@ class SurveillanceApp {
         }
     }
 
+    async showTimelineForAnalysis(videoFile) {
+        try {
+            showNotification('Loading timeline for analysis...', 'info');
+
+            // Fetch stored caption data for the selected video
+            const response = await fetch(`/api/video-caption/${encodeURIComponent(videoFile)}`);
+            if (!response.ok) {
+                throw new Error('Failed to load caption data');
+            }
+
+            const result = await response.json();
+            if (!result.success || !result.data) {
+                throw new Error('No caption data available');
+            }
+
+            // Set up global variables for timeline use
+            currentVideoData = {
+                filename: videoFile,
+                duration: result.data.video_duration || 0,
+                fps_used: result.data.fps_used || 3.0,
+                processing_mode: result.data.analysis_method || 'unknown'
+            };
+
+            // Convert stored caption data to format expected by timeline
+            currentCaptionData = result.data.chunk_details?.map(chunk => ({
+                chunk_id: chunk.chunk_id || 1,
+                start_time: chunk.start_time || 0,
+                end_time: chunk.end_time || (chunk.start_time || 0) + 30,
+                caption: chunk.caption || ''
+            })) || [];
+
+            if (currentCaptionData.length === 0) {
+                showNotification('No caption data available for timeline generation', 'warning');
+                return;
+            }
+
+            // Switch to caption page and show timeline
+            this.switchToCaptionPage();
+
+            // Wait a moment for the page to switch, then show timeline
+            setTimeout(() => {
+                showTimeline();
+            }, 500);
+
+            showNotification('Timeline loaded successfully', 'success');
+
+        } catch (error) {
+            console.error('Error showing timeline for analysis:', error);
+            showNotification(`Failed to load timeline: ${error.message}`, 'error');
+        }
+    }
+
+    switchToCaptionPage() {
+        // Switch to the caption generation page
+        const captionPage = document.querySelector('[data-page="caption"]');
+        const analysisPage = document.querySelector('[data-page="analysis"]');
+
+        if (captionPage && analysisPage) {
+            // Update navigation
+            document.querySelectorAll('.sidebar-compact .nav-link').forEach(link => {
+                link.classList.remove('active');
+            });
+
+            const captionLink = document.querySelector('[data-page="caption"]');
+            if (captionLink) {
+                captionLink.classList.add('active');
+            }
+
+            // Hide analysis page and show caption page
+            analysisPage.classList.add('hidden');
+            captionPage.classList.remove('hidden');
+
+            // Update page title
+            document.title = 'InternVideo2.5 Surveillance System - Caption Generation';
+        }
+    }
+
     formatTime(seconds) {
         const mins = Math.floor(seconds / 60);
         const secs = Math.floor(seconds % 60);
@@ -790,6 +1910,11 @@ class CaptionGenerator {
     init() {
         this.setupEventListeners();
         this.loadAvailableVideos();
+
+        // Set up periodic check for timeline button
+        setInterval(() => {
+            this.checkAndShowTimelineButton();
+        }, 2000); // Check every 2 seconds
     }
 
     setupEventListeners() {
@@ -815,6 +1940,16 @@ class CaptionGenerator {
         }
         if (modeSelect) {
             modeSelect.addEventListener('change', () => this.updateTimeEstimation());
+        }
+    }
+
+    checkAndShowTimelineButton() {
+        // Check if we have caption data and show timeline button if available
+        if (currentCaptionData && currentCaptionData.length > 0) {
+            const timelineBtn = document.getElementById('caption-page-timeline-btn');
+            if (timelineBtn) {
+                timelineBtn.classList.remove('hidden');
+            }
         }
     }
 
@@ -853,6 +1988,9 @@ class CaptionGenerator {
                 });
                 
                 console.log(`Caption generator: Loaded ${data.videos.length} videos successfully`);
+
+                // Check if timeline button should be shown
+                this.checkAndShowTimelineButton();
             } else {
                 videoSelect.innerHTML = '<option value="">No videos found</option>';
                 console.warn('No videos data received for caption generator');
@@ -863,7 +2001,7 @@ class CaptionGenerator {
             if (videoSelect) {
                 videoSelect.innerHTML = '<option value="">Failed to load videos</option>';
             }
-            
+
             if (window.showNotification) {
                 window.showNotification('Failed to load video list for caption generator', 'error');
             }
@@ -895,6 +2033,23 @@ class CaptionGenerator {
         // Initialize real-time results display
         this.initializeRealTimeResults();
 
+        // Store current video data for timeline use
+        currentVideoData = {
+            filename: videoSelect.value,
+            fps_sampling: parseFloat(fpsInput.value) || 1.0,
+            chunk_size: parseInt(chunkSize.value) || 60,
+            processing_mode: modeSelect.value || 'sequential'
+        };
+
+        // Reset caption data for new generation
+        currentCaptionData = [];
+
+        // Hide timeline view and show caption results
+        const timelineView = document.getElementById('timeline-view');
+        const captionResults = document.getElementById('caption-results');
+        if (timelineView) timelineView.classList.add('hidden');
+        if (captionResults) captionResults.classList.remove('hidden');
+
         const requestData = {
             video_file: videoSelect.value,
             fps_sampling: parseFloat(fpsInput.value) || 1.0,
@@ -905,6 +2060,14 @@ class CaptionGenerator {
         };
 
         try {
+            console.log('🚀 Starting caption generation with GPT:', {
+                videoFile: requestData.video_file,
+                prompt: requestData.prompt,
+                fps: requestData.fps_sampling,
+                chunkSize: requestData.chunk_size,
+                mode: requestData.processing_mode
+            });
+
             // Use Server-Sent Events for real-time updates
             const response = await fetch('/generate-caption-stream', {
                 method: 'POST',
@@ -1007,29 +2170,38 @@ class CaptionGenerator {
                 break;
                 
             case 'chunk_complete':
+                // Log GPT response received
+                console.log('🤖 GPT Response Received:', {
+                    chunk: data.chunk,
+                    timestamp: `${data.start_time.toFixed(1)}s - ${data.end_time.toFixed(1)}s`,
+                    caption: data.caption,
+                    processingTime: data.processing_time,
+                    characters: data.characters
+                });
+
                 // Update progress
                 const progress = data.progress || 0;
                 progressFill.style.width = `${progress}%`;
-                
+
                 // Calculate chunk timing
                 const chunkTime = this.currentChunkStart ? performance.now() - this.currentChunkStart : 0;
                 const totalTime = this.captionStartTime ? performance.now() - this.captionStartTime : 0;
-                
+
                 progressText.textContent = `Completed chunk ${data.chunk}/${data.total_chunks} (${progress.toFixed(1)}%) - ${formatDuration(totalTime)} total`;
-                
+
                 // Make caption results visible
                 captionResults.classList.remove('hidden');
-                
+
                 // Add chunk result to display with enhanced timing
                 const chunkDiv = document.createElement('div');
                 chunkDiv.className = 'chunk-result';
-                
+
                 // Ensure caption is displayed even if empty
                 let captionText = data.caption || 'No caption text available';
                 if (typeof captionText !== 'string') {
                     captionText = JSON.stringify(captionText);
                 }
-                
+
                 chunkDiv.innerHTML = `
                     <div class="chunk-header">
                         <strong>📹 Chunk ${data.chunk}/${data.total_chunks}</strong>
@@ -1042,7 +2214,20 @@ class CaptionGenerator {
                 `;
                 captionResults.appendChild(chunkDiv);
                 captionResults.scrollTop = captionResults.scrollHeight; // Auto-scroll
-                
+
+                // Store caption data for timeline use
+                if (!currentCaptionData) {
+                    currentCaptionData = [];
+                }
+                currentCaptionData.push({
+                    chunk_id: data.chunk_id || data.chunk,
+                    start_time: data.start_time,
+                    end_time: data.end_time,
+                    caption: data.caption,
+                    processing_time: data.processing_time,
+                    characters: data.characters || 0
+                });
+
                 // Log for debugging
                 console.log('Chunk completed:', data);
                 break;
@@ -1061,16 +2246,34 @@ class CaptionGenerator {
             case 'complete':
                 // Calculate total processing time
                 const finalTotalTime = this.captionStartTime ? performance.now() - this.captionStartTime : 0;
-                
+
                 progressText.textContent = `✅ Completed! ${data.chunks_processed} chunks in ${formatDuration(finalTotalTime)}`;
                 progressFill.style.width = '100%';
-                
+
+                // Store additional video metadata from the completion data
+                if (data.video_duration && currentVideoData) {
+                    currentVideoData.duration = data.video_duration;
+                }
+                if (data.frames_processed && currentVideoData) {
+                    currentVideoData.frames_processed = data.frames_processed;
+                }
+                if (data.analysis_method && currentVideoData) {
+                    currentVideoData.processing_mode = data.analysis_method;
+                }
+
                 // Show completion notification
                 showNotification(
-                    `✅ Caption generation completed in ${formatDuration(finalTotalTime)}`, 
-                    'success', 
+                    `✅ Caption generation completed in ${formatDuration(finalTotalTime)}`,
+                    'success',
                     6000
                 );
+
+                // Show timeline button in caption page
+                const timelineBtn = document.getElementById('caption-page-timeline-btn');
+                if (timelineBtn && currentCaptionData && currentCaptionData.length > 0) {
+                    timelineBtn.classList.remove('hidden');
+                    showNotification('Timeline button is now available', 'info');
+                }
                 break;
                 
             case 'error':

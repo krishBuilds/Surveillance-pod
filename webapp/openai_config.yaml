@@ -1,6 +1,21 @@
 openai:
   api_key: "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"
   model: "gpt-4o-mini"
-  max_tokens: 150
+  max_tokens: 1024
   temperature: 0.3
   timeout: 30
+
+# Timeline Processing Settings
+timeline:
+  enable_gpt_processing: true
+  fallback_to_basic_parsing: true
+  min_event_duration: 0.5  # Minimum event duration in seconds
+  max_events_per_video: 50
+  confidence_threshold: 0.6
+
+# Visual Settings
+visual:
+  thumbnail_size: 120
+  key_frame_interval: 2.0  # Seconds between key frames
+  visual_significance_threshold: 5  # Minimum significance for display
+  enable_thumbnails: true
