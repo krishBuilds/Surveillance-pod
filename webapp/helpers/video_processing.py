@@ -91,7 +91,7 @@ def process_temporal_video_segment(model_manager, video_path: str, prompt: str, 
                                  generation_config: Dict = None) -> Dict:
     """
     Process video segment with temporal analysis - focused on time-based events
-    
+
     Args:
         model_manager: Enhanced model manager instance
         video_path: Path to video file
@@ -100,22 +100,46 @@ def process_temporal_video_segment(model_manager, video_path: str, prompt: str, 
         start_time: Start time in seconds
         end_time: End time in seconds
         fps_sampling: FPS sampling rate
-        
+
     Returns:
         Dictionary with temporal analysis results
     """
     logger.info(f"Processing temporal video segment: {start_time:.1f}s-{end_time:.1f}s")
-    
+
     try:
-        # Use a more natural prompt that avoids structured lists
-        temporal_prompt = f"""{prompt}
+        # Calculate frame timestamps for enhanced temporal analysis
+        frame_timestamps = []
+        for i in range(num_frames):
+            timestamp = start_time + (i / fps_sampling)
+            if timestamp <= end_time:
+                frame_timestamps.append(timestamp)
 
-Focus on what happens in this {end_time - start_time:.1f} second video segment from {start_time:.1f}s to {end_time:.1f}s.
+        # Create enhanced temporal prompt with full frame annotation
+        frame_annotations = []
+        # Show all frames with timestamps
+        for i, timestamp in enumerate(frame_timestamps):
+            frame_annotations.append(f"Frame {i+1} (t={timestamp:.1f}s): <image>")
 
-Describe the main actions, characters, and events in a natural, flowing narrative. Include key moments and any important changes that occur during this time period.
+        temporal_prompt = f"""Report events with timestamps in seconds.
 
-Write your response as a descriptive paragraph rather than a numbered list."""
-        
+{chr(10).join(frame_annotations)}
+
+Focus on timing of key events with specific seconds."""
+
+        # Use enhanced generation config for temporal analysis (better for detailed responses)
+        temporal_generation_config = {
+            'do_sample': True,
+            'temperature': 0.3,
+            'max_new_tokens': 1024,
+            'top_p': 0.8,
+            'num_beams': 1,
+            'repetition_penalty': 1.2,
+            'length_penalty': 1.0
+        }
+
+        # Override with provided config or use temporal defaults
+        final_generation_config = generation_config if generation_config else temporal_generation_config
+
         result = process_video_segment(
             model_manager=model_manager,
             video_path=video_path,
@@ -124,15 +148,16 @@ Write your response as a descriptive paragraph rather than a numbered list."""
             start_time=start_time,
             end_time=end_time,
             fps_sampling=fps_sampling,
-            generation_config=generation_config
+            generation_config=final_generation_config
         )
-        
+
         if result.get('success'):
-            result['analysis_type'] = 'temporal'
+            result['analysis_type'] = 'temporal_enhanced'
             result['temporal_focus'] = True
-            
+            result['frame_timestamps'] = frame_timestamps
+
         return result
-        
+
     except Exception as e:
         logger.error(f"Exception in temporal video processing: {str(e)}", exc_info=True)
         return {
@@ -140,7 +165,7 @@ Write your response as a descriptive paragraph rather than a numbered list."""
             'error': str(e),
             'start_time': start_time,
             'end_time': end_time,
-            'analysis_type': 'temporal'
+            'analysis_type': 'temporal_enhanced'
         }
 
 def calculate_video_chunks(duration: float, chunk_size: int = 60, processing_mode: str = 'sequential') -> List[Dict]:

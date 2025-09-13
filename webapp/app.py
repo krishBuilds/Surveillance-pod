@@ -310,7 +310,20 @@ def generate_caption_stream():
         video_file = data.get('video_file', '')
         fps_sampling = float(data.get('fps_sampling', 1.0))
         chunk_size = int(data.get('chunk_size', 60))
-        prompt = data.get('prompt', 'Generate a detailed caption describing what happens in this video.')
+        prompt = data.get('prompt', '''Generate a detailed temporal analysis of this video.
+
+Instructions:
+1. Analyze the temporal progression of events frame by frame
+2. For each significant action or event, include the specific timestamp when it occurs
+3. Describe how the scene evolves over time from start to finish
+4. Note any changes, movements, or transitions between frames
+5. Provide a detailed chronological narrative with precise timing information
+
+Response Format:
+- Include specific timestamps for key events (e.g., "At 12.3s, a person enters the scene")
+- Describe the sequence of actions with timing references
+- Note any temporal patterns or recurring events
+- Focus on the temporal flow and timing relationships between different elements''')
         processing_mode = data.get('processing_mode', 'sequential')
         output_format = data.get('output_format', 'paragraph')
     except Exception as e:
@@ -558,7 +571,20 @@ def generate_caption():
         video_file = data.get('video_file', '')
         fps_sampling = float(data.get('fps_sampling', 1.0))
         chunk_size = int(data.get('chunk_size', 60))
-        prompt = data.get('prompt', 'Generate a detailed caption describing what happens in this video.')
+        prompt = data.get('prompt', '''Generate a detailed temporal analysis of this video.
+
+Instructions:
+1. Analyze the temporal progression of events frame by frame
+2. For each significant action or event, include the specific timestamp when it occurs
+3. Describe how the scene evolves over time from start to finish
+4. Note any changes, movements, or transitions between frames
+5. Provide a detailed chronological narrative with precise timing information
+
+Response Format:
+- Include specific timestamps for key events (e.g., "At 12.3s, a person enters the scene")
+- Describe the sequence of actions with timing references
+- Note any temporal patterns or recurring events
+- Focus on the temporal flow and timing relationships between different elements''')
         processing_mode = data.get('processing_mode', 'sequential')
         output_format = data.get('output_format', 'paragraph')
         
@@ -754,7 +780,20 @@ def generate_caption_original():
         video_file = data.get('video_file', '')
         fps_sampling = float(data.get('fps_sampling', 1.0))
         chunk_size = int(data.get('chunk_size', 60))
-        prompt = data.get('prompt', 'Generate a detailed caption describing what happens in this video.')
+        prompt = data.get('prompt', '''Generate a detailed temporal analysis of this video.
+
+Instructions:
+1. Analyze the temporal progression of events frame by frame
+2. For each significant action or event, include the specific timestamp when it occurs
+3. Describe how the scene evolves over time from start to finish
+4. Note any changes, movements, or transitions between frames
+5. Provide a detailed chronological narrative with precise timing information
+
+Response Format:
+- Include specific timestamps for key events (e.g., "At 12.3s, a person enters the scene")
+- Describe the sequence of actions with timing references
+- Note any temporal patterns or recurring events
+- Focus on the temporal flow and timing relationships between different elements''')
         processing_mode = data.get('processing_mode', 'sequential')
         output_format = data.get('output_format', 'paragraph')
         
@@ -984,14 +1023,15 @@ def process_video_segment(model_manager, video_path, prompt, num_frames, start_t
         
         # Remove common HTML tags and fragments that may remain after tracking removal
         html_patterns = [
-            r'<[^>]+>',  # General HTML tags
-            r'^\w+>$',   # Standalone fragments like 'div>', 'span>' at start/end
-            r'^<\w+',    # Opening tags at start like '<div'
-            r'\w+>$',    # Closing fragments at end like 'div>'
-            r'<br\s*/?>', # HTML line breaks
+            r'<[^>]+>',  # General HTML tags - remove all complete HTML tags
+            r'<\s*/?\s*\w+\s*/?\s*>',  # Self-closing or malformed tags
+            r'/?>',  # Standalone closing brackets
+            r'<\s*\w+',  # Incomplete opening tags
+            r'\w+\s*>',  # Incomplete closing tags
+            r'\s*br\s*/?\s*',  # Any br fragments
             r'&nbsp;',   # Non-breaking spaces
-            r'\s*br\s*/?>\s*',  # Standalone br fragments
             r'\s*</?p>\s*',  # Paragraph tags
+            r'&lt;|&gt;|&amp;',  # HTML entities
         ]
         for pattern in html_patterns:
             cleaned_output = re.sub(pattern, ' ', cleaned_output, flags=re.IGNORECASE).strip()
@@ -1174,7 +1214,7 @@ def get_stored_captions():
         logger.error(f"Error fetching stored captions: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/video-caption/<video_file>', methods=['GET'])
+@app.route('/api/video-caption/<filename>', methods=['GET'])
 @app.route('/serve-video/<path:filename>')
 def serve_video(filename):
     """Serve video files with proper streaming support"""

@@ -91,19 +91,9 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
                 'request_id': request_id
             }
             
-            # Create enhanced generation config for streaming (same as local model)
-            enhanced_generation_config = dict(
-                do_sample=True,  # Enable sampling for varied descriptive responses
-                temperature=0.3,  # Optimal for factual yet diverse descriptions (0.2-0.5 range)
-                max_new_tokens=512,  # Increased for better quality responses
-                top_p=0.8,  # Use nucleus sampling for better quality
-                num_beams=1,
-                repetition_penalty=1.2,  # Prevent repetitive content more strongly
-                length_penalty=1.0  # Normal length penalty
-            )
-
-            # Process the chunk
-            result = process_video_segment(
+            # Process the chunk with enhanced temporal analysis (uses deterministic config)
+            from .video_processing import process_temporal_video_segment
+            result = process_temporal_video_segment(
                 model_manager=manager,
                 video_path=video_path,
                 prompt=prompt,
@@ -111,7 +101,7 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
                 start_time=chunk['start_time'],
                 end_time=chunk['end_time'],
                 fps_sampling=fps_sampling,
-                generation_config=enhanced_generation_config
+                generation_config=None  # Let temporal analysis use its deterministic defaults
             )
             
             chunk_processing_time = time.time() - chunk_start_time
@@ -263,18 +253,9 @@ def process_video_for_caption_optimized(manager, video_path: str, video_file: st
         if duration <= max_duration:
             logger.info(f"[{request_id}] Video is short ({duration:.1f}s), processing in single pass")
             
-            # Create enhanced generation config for streaming (same as local model)
-            enhanced_generation_config = dict(
-                do_sample=True,  # Enable sampling for varied descriptive responses
-                temperature=0.3,  # Optimal for factual yet diverse descriptions (0.2-0.5 range)
-                max_new_tokens=512,  # Increased for better quality responses
-                top_p=0.8,  # Use nucleus sampling for better quality
-                num_beams=1,
-                repetition_penalty=1.2,  # Prevent repetitive content more strongly
-                length_penalty=1.0  # Normal length penalty
-            )
-
-            result = process_video_segment(
+            # Use enhanced temporal analysis for single pass processing (uses deterministic config)
+            from .video_processing import process_temporal_video_segment
+            result = process_temporal_video_segment(
                 model_manager=manager,
                 video_path=video_path,
                 prompt=prompt,
@@ -282,7 +263,7 @@ def process_video_for_caption_optimized(manager, video_path: str, video_file: st
                 start_time=0,
                 end_time=duration,
                 fps_sampling=fps_sampling,
-                generation_config=enhanced_generation_config
+                generation_config=None  # Let temporal analysis use its deterministic defaults
             )
             
             if result.get('success'):

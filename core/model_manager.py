@@ -384,16 +384,26 @@ class ModelManager:
                 pixel_values = pixel_values.to(torch.bfloat16).to(self.model.device)
                 logger.info("Using bfloat16 precision for full precision model")
             
-            video_prefix = "".join([f"Frame{i+1}: <image>\n" for i in range(len(num_patches_list))])
+            # Check if this is temporal analysis and create enhanced video prefix with timestamps
+            if hasattr(self, 'current_frame_timestamps') and self.current_frame_timestamps:
+                # Use timestamps for temporal analysis - annotate all frames
+                temporal_frames = [f"Frame{i+1} (t={self.current_frame_timestamps[i]:.1f}s): <image>\n" for i in range(len(num_patches_list))]
+                video_prefix = "".join(temporal_frames)
+                logger.info(f"Using temporal video prefix with timestamps for all {len(self.current_frame_timestamps)} frames")
+            else:
+                # Use standard prefix for non-temporal analysis
+                video_prefix = "".join([f"Frame{i+1}: <image>\n" for i in range(len(num_patches_list))])
 
-            # Prepare generation config - use provided config or default
+            # Prepare generation config - use provided config or enhanced default
             if generation_config is None:
                 generation_config = dict(
-                    do_sample=False,
-                    temperature=0.0,
+                    do_sample=True,
+                    temperature=0.3,
                     max_new_tokens=max_tokens,
-                    top_p=0.1,
-                    num_beams=1
+                    top_p=0.8,
+                    num_beams=1,
+                    repetition_penalty=1.2,
+                    length_penalty=1.0
                 )
             else:
                 # Use provided generation config but ensure max_tokens is set
@@ -557,13 +567,15 @@ class ModelManager:
                 pixel_values = pixel_values.to(torch.bfloat16).to(self.model.device)
                 logger.info("Using bfloat16 precision for full precision model")
             
-            # Prepare generation config
+            # Prepare generation config with enhanced settings
             generation_config = dict(
-                do_sample=False,
-                temperature=0.0,
+                do_sample=True,
+                temperature=0.3,
                 max_new_tokens=max_tokens,
-                top_p=0.1,
-                num_beams=1
+                top_p=0.8,
+                num_beams=1,
+                repetition_penalty=1.2,
+                length_penalty=1.0
             )
             
             # Build question with image token
