@@ -18,16 +18,11 @@ import torch
 from typing import List
 from pathlib import Path
 
-# Add parent directory to path to access main_enhanced.py
+# Add parent directory to path to access core modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Import enhanced model manager
-from main_enhanced import EnhancedModelManager
 # Import simple caption storage
 from simple_caption_storage import SimpleCaptionStorage
-# Import model client for persistent model connection
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Import model client for persistent model connection (local to webapp)
 from model_server import ModelClient
 
 # Import helper modules
@@ -36,6 +31,7 @@ from helpers import (
     process_temporal_video_segment,
     process_video_for_caption_streaming,
     process_video_for_caption,
+    calculate_video_chunks,
     get_available_videos,
     serve_original_video,
     serve_video,
@@ -77,13 +73,10 @@ if IS_DEVELOPMENT:
 # Default video path
 DEFAULT_VIDEO = "inputs/videos/bigbuckbunny.mp4"
 
-# Global enhanced manager instance
-enhanced_manager = None
 
 # Model server configuration
 MODEL_SERVER_HOST = os.environ.get('MODEL_SERVER_HOST', 'localhost')
 MODEL_SERVER_PORT = int(os.environ.get('MODEL_SERVER_PORT', '8188'))
-USE_MODEL_SERVER = os.environ.get('USE_MODEL_SERVER', 'true').lower() == 'true'
 
 # Global model client instance
 model_client = None
@@ -136,7 +129,7 @@ def get_openai_client():
 def get_model_client():
     """Get or create the model client with connection management"""
     global model_client
-    if model_client is None and USE_MODEL_SERVER:
+    if model_client is None:
         logger.info("=== INITIALIZING MODEL CLIENT ===")
         logger.info(f"Connecting to model server at {MODEL_SERVER_HOST}:{MODEL_SERVER_PORT}")
         
@@ -151,7 +144,7 @@ def get_model_client():
                 logger.info("SUCCESS: Connected to model server")
                 logger.info("=== MODEL CLIENT READY ===")
                 return model_client
-            else:
+            else:  # Should not happen with server-only mode
                 logger.error(f"FAILED to connect to model server: {ping_result}")
                 model_client = None
                 return None
@@ -167,8 +160,7 @@ def check_model_server():
     """Check if model server is available and reconnect if needed"""
     global model_client
     
-    if not USE_MODEL_SERVER:
-        return None
+    # Always use model server - no local mode
     
     if model_client is None:
         return get_model_client()
@@ -188,126 +180,27 @@ def check_model_server():
         model_client = None
         return get_model_client()
 
-def get_enhanced_manager():
-    """Get or create the enhanced model manager with memory cleanup"""
-    global enhanced_manager
-    if enhanced_manager is None:
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        logger.info("=== INITIALIZING ENHANCED MODEL MANAGER ===")
-        
-        if IS_DEVELOPMENT:
-            logger.info("🔧 Development mode - optimizing model loading for persistence")
-        logger.info(f"Base directory: {base_dir}")
-        
-        model_path = os.path.join(base_dir, "models/InternVideo2_5")
-        config_path = os.path.join(base_dir, "config.yaml")
-        
-        logger.info(f"Model path: {model_path}")
-        logger.info(f"Model path exists: {os.path.exists(model_path)}")
-        logger.info(f"Config path: {config_path}")
-        logger.info(f"Config path exists: {os.path.exists(config_path)}")
-        
-        try:
-            logger.info("Creating EnhancedModelManager instance...")
-            enhanced_manager = EnhancedModelManager(
-                model_path=model_path,
-                device="auto",
-                precision="bf16",
-                config_path=config_path
-            )
-            logger.info("EnhancedModelManager instance created successfully")
-            
-            logger.info("Initializing model (this may take 15-20 seconds)...")
-            
-            if not enhanced_manager.initialize_model():
-                logger.error("FAILED to load model - initialization returned False")
-                logger.error("Check model files, GPU availability, and dependencies")
-                return None
-                
-            logger.info("SUCCESS: Enhanced Model Manager initialized")
-            logger.info(f"Model device: {enhanced_manager.model_manager.device}")
-            logger.info(f"Model precision: {enhanced_manager.model_manager.precision}")
-            
-            # Clean up any cached data while keeping model loaded
-            logger.info("Cleaning up cache and preprocessed data...")
-            try:
-                enhanced_manager.model_manager.clear_processing_cache()
-                logger.info("Cache cleared successfully")
-            except Exception as cleanup_error:
-                logger.warning(f"Cache cleanup warning: {str(cleanup_error)}")
-            
-            logger.info("=== MODEL MANAGER READY ===")
-            
-        except Exception as e:
-            logger.error(f"EXCEPTION during manager initialization: {str(e)}", exc_info=True)
-            logger.error("This could be due to:")
-            logger.error("- Missing model files")
-            logger.error("- GPU/CUDA issues") 
-            logger.error("- Dependency problems")
-            logger.error("- Memory issues")
-            return None
-    
-    return enhanced_manager
 
-def auto_detect_model_server():
-    """Auto-detect if model server is running and update USE_MODEL_SERVER accordingly"""
-    global USE_MODEL_SERVER
-    
-    # If USE_MODEL_SERVER is explicitly set to true/false, don't auto-detect
-    env_use_server = os.environ.get('USE_MODEL_SERVER', '').lower()
-    if env_use_server in ['true', 'false']:
-        logger.info(f"USE_MODEL_SERVER explicitly set to: {env_use_server}")
-        return
-    
-    # Auto-detect mode - check if model server is running
-    logger.info("🔍 Auto-detecting model server...")
-    try:
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)  # 2 second timeout
-        result = sock.connect_ex((MODEL_SERVER_HOST, MODEL_SERVER_PORT))
-        sock.close()
-        
-        if result == 0:
-            USE_MODEL_SERVER = True
-            logger.info(f"✅ Model server detected at {MODEL_SERVER_HOST}:{MODEL_SERVER_PORT} - using server mode")
-        else:
-            USE_MODEL_SERVER = False
-            logger.info("❌ No model server detected - using local mode")
-    except Exception as e:
-        USE_MODEL_SERVER = False
-        logger.info(f"❌ Model server detection failed: {str(e)} - using local mode")
 
 def startup_cleanup():
     """Clean up memory and cache on app startup while keeping model loaded"""
     logger.info("=== WEBAPP STARTUP CLEANUP ===")
-    
+
     if IS_DEVELOPMENT:
         logger.info("🔧 Development startup - optimizing for persistence")
-    
+
     try:
-        # Auto-detect model server if in auto mode
-        auto_detect_model_server()
-        
         # Clear any existing CUDA cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             logger.info("CUDA cache cleared")
-        
-        if USE_MODEL_SERVER:
-            # Initialize model client
-            client = get_model_client()
-            if client:
-                logger.info("Model client connection established")
-            else:
-                logger.warning("Failed to connect to model server - webapp will work but model functions may fail")
-        else:
-            # Initialize manager and clean cache (original behavior)
-            manager = get_enhanced_manager()
-            if manager:
-                logger.info("Startup cleanup completed successfully")
-            else:
-                logger.error("Manager initialization failed during startup")
+
+        # Initialize model client
+        client = get_model_client()
+        if client:
+            logger.info("Model client connection established")
+        else:  # Should not happen with server-only mode
+            logger.warning("Failed to connect to model server - webapp will work but model functions may fail")
             
     except Exception as e:
         logger.error(f"Startup cleanup error: {str(e)}")
@@ -347,10 +240,10 @@ def get_available_videos():
                             minutes = int(duration // 60)
                             seconds = int(duration % 60)
                             duration_str = f"{minutes}:{seconds:02d}"
-                        else:
+                        else:  # Should not happen with server-only mode
                             duration_str = "Unknown"
                         cap.release()
-                    else:
+                    else:  # Should not happen with server-only mode
                         duration_str = "Unknown"
                 except Exception as e:
                     logger.warning(f"Could not get duration for {filename}: {str(e)}")
@@ -427,45 +320,147 @@ def generate_caption_stream():
         final_result = None
         try:
             logger.info(f"[{request_id}] === STREAMING CAPTION GENERATION START ===")
-            
-            manager = get_enhanced_manager()
-            if not manager:
-                yield f"data: {json.dumps({'error': 'Model manager not initialized'})}\n\n"
-                return
+
+            # Check model availability based on server mode
+            if True:  # Always use model server
+                client = check_model_server()
+                if not client:
+                    logger.error(f"[{request_id}] FAILED: Model server not available")
+                    yield f"data: {json.dumps({'error': 'Model server not available'})}\n\n"
+                    return
+                model_source = "server"
+            else:  # Should not happen with server-only mode
+                manager = get_enhanced_manager()
+                if not manager:
+                    logger.error(f"[{request_id}] FAILED: Model manager not initialized")
+                    yield f"data: {json.dumps({'error': 'Model manager not initialized'})}\n\n"
+                    return
+                model_source = "local"
             
             # Send initial status
-            yield f"data: {json.dumps({'type': 'status', 'message': f'Starting caption generation for {video_file}', 'request_id': request_id})}\n\n"
-            
-            # Stream caption generation with real-time updates
+            yield f"data: {json.dumps({'type': 'status', 'message': f'Starting caption generation for {video_file} ({model_source} mode)', 'request_id': request_id})}\n\n"
+
+            # Stream caption generation based on server mode
             video_path = os.path.join('/workspace/surveillance/inputs/videos', video_file)
+
+            if True:  # Always use model server
+                # Use model server with existing helper function for consistency
+                # Create a simple adapter to make ModelClient work with streaming helpers
+                class ModelClientAdapter:
+                    def __init__(self, client, video_path, fps_sampling, chunk_size):
+                        self.client = client
+                        self.video_path = video_path
+                        self.fps_sampling = fps_sampling
+                        self.chunk_size = chunk_size
+                        # Mock model_manager for compatibility
+                        self.model_manager = self
+
+                    def _get_video_info(self, video_path):
+                        # Simple video info using OpenCV
+                        import cv2
+                        try:
+                            cap = cv2.VideoCapture(video_path)
+                            if cap.isOpened():
+                                fps = cap.get(cv2.CAP_PROP_FPS)
+                                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                                duration = frame_count / fps if fps > 0 else 0
+                                cap.release()
+                                return {
+                                    'duration_seconds': duration,
+                                    'duration': duration,
+                                    'frames': frame_count,
+                                    'fps': fps
+                                }
+                            else:  # Should not happen with server-only mode
+                                return {'duration_seconds': 0, 'duration': 0, 'frames': 0, 'fps': 0}
+                        except:
+                            return {'duration_seconds': 0, 'duration': 0, 'frames': 0, 'fps': 0}
+
+                    def get_optimal_frame_count(self):
+                        # Store the fps_sampling and chunk_size from the streaming parameters
+                        # This will be calculated dynamically based on chunk size and fps_sampling
+                        return min(160, int(self.fps_sampling * self.chunk_size))
+
+                    def process_video(self, video_path, prompt, num_frames, fps_sampling=1.0,
+                                    start_time=0, end_time=None, generation_config=None):
+                        # Use the model client to process video
+                        return self.client.process_video(
+                            video_path=video_path,
+                            prompt=prompt,
+                            num_frames=num_frames,
+                            fps_sampling=fps_sampling,
+                            start_time=start_time,
+                            end_time=end_time,
+                            generation_config=generation_config
+                        )
+
+                # Use the exact same processing flow as local mode
+                adapter = ModelClientAdapter(client, video_path, fps_sampling, chunk_size)
+                for update in process_video_for_caption_streaming(
+                    adapter, video_path, video_file, fps_sampling,
+                    chunk_size, prompt, processing_mode, output_format, request_id
+                ):
+                    # Replace the model manager calls with model client calls
+                    if update.get('type') == 'processing_chunk':
+                        # Extract chunk info and use model server
+                        chunk_info = update.get('chunk_info', {})
+                        start_time = chunk_info.get('start_time', 0)
+                        end_time = chunk_info.get('end_time', 60)
+                        chunk_duration = end_time - start_time
+                        chunk_frames = min(160, int(fps_sampling * chunk_duration))
+
+                        chunk_result = client.process_video(
+                            video_path=video_path,
+                            prompt=prompt,
+                            num_frames=chunk_frames,
+                            fps_sampling=fps_sampling,
+                            start_time=start_time,
+                            end_time=end_time
+                        )
+
+                        if chunk_result and chunk_result.get('success'):
+                            update['success'] = True
+                            update['response'] = chunk_result.get('response', '')
+                            update['frames_processed'] = chunk_result.get('num_frames', chunk_frames)
+                        else:  # Should not happen with server-only mode
+                            update['success'] = False
+                            update['error'] = chunk_result.get('error', 'Chunk processing failed') if chunk_result else 'Unknown error'
+
+                    # Capture the final result for storage
+                    if update.get('type') == 'complete' and update.get('success'):
+                        final_result = update
+
+                    yield f"data: {json.dumps(update)}\n\n"
+
+            else:  # Should not happen with server-only mode
+                # Use local model for streaming
+                for update in process_video_for_caption_streaming(
+                    manager, video_path, video_file, fps_sampling,
+                    chunk_size, prompt, processing_mode, output_format, request_id
+                ):
+                    # Capture the final result for storage
+                    if update.get('type') == 'complete' and update.get('success'):
+                        final_result = update
+
+                    yield f"data: {json.dumps(update)}\n\n"
             
-            # Use the streaming generator version
-            for update in process_video_for_caption_streaming(
-                manager, video_path, video_file, fps_sampling, 
-                chunk_size, prompt, processing_mode, output_format, request_id
-            ):
-                # Capture the final result for storage
-                if update.get('type') == 'complete' and update.get('success'):
-                    final_result = update
-                
-                yield f"data: {json.dumps(update)}\n\n"
-            
-            # Store caption in database after streaming completes
+            # Store caption in database after processing completes
             if final_result:
                 try:
                     db = get_caption_db()
                     storage_data = {
                         'caption': final_result.get('caption', ''),
-                        'chunk_details': [],  # Streaming doesn't provide chunk details
+                        'chunk_details': [],  # Model server doesn't provide chunk details
                         'video_duration': 0,  # Will be calculated from video info
-                        'frames_processed': final_result.get('total_frames', 0),
+                        'frames_processed': final_result.get('frames_processed', final_result.get('total_frames', 0)),
                         'fps_used': fps_sampling,
-                        'chunk_size': chunk_size
+                        'chunk_size': chunk_size,
+                        'analysis_method': final_result.get('analysis_method', 'temporal_analysis')
                     }
                     
                     if db.store_video_caption(video_file, storage_data):
                         logger.info(f"[{request_id}] Caption automatically stored after streaming for video: {video_file}")
-                    else:
+                    else:  # Should not happen with server-only mode
                         logger.warning(f"[{request_id}] Failed to store caption after streaming for video: {video_file}")
                         
                 except Exception as storage_error:
@@ -481,7 +476,7 @@ def generate_caption_stream():
 def get_model_status():
     """Get model server status"""
     try:
-        if USE_MODEL_SERVER:
+        if True:  # Always use model server
             client = check_model_server()
             if client:
                 model_info = client.get_model_info()
@@ -494,21 +489,21 @@ def get_model_status():
                         'max_frames': model_info.get('max_frames'),
                         'mode': 'server'
                     })
-                else:
+                else:  # Should not happen with server-only mode
                     return jsonify({
                         'status': 'connected',
                         'model_loaded': False,
                         'error': 'Model not loaded on server',
                         'mode': 'server'
                     })
-            else:
+            else:  # Should not happen with server-only mode
                 return jsonify({
                     'status': 'disconnected',
                     'model_loaded': False,
                     'error': 'Cannot connect to model server',
                     'mode': 'server'
                 })
-        else:
+        else:  # Should not happen with server-only mode
             manager = get_enhanced_manager()
             if manager and manager.model_manager.model:
                 return jsonify({
@@ -519,7 +514,7 @@ def get_model_status():
                     'max_frames': manager.model_manager.get_optimal_frame_count(),
                     'mode': 'local'
                 })
-            else:
+            else:  # Should not happen with server-only mode
                 return jsonify({
                     'status': 'not_loaded',
                     'model_loaded': False,
@@ -543,13 +538,13 @@ def generate_caption():
         logger.info(f"[{request_id}] === CAPTION GENERATION REQUEST START ===")
         
         # Check model availability
-        if USE_MODEL_SERVER:
+        if True:  # Always use model server
             client = check_model_server()
             if not client:
                 logger.error(f"[{request_id}] FAILED: Model server not available")
                 return jsonify({'error': 'Model server not available'}), 500
             model_source = "server"
-        else:
+        else:  # Should not happen with server-only mode
             manager = get_enhanced_manager()
             if not manager:
                 logger.error(f"[{request_id}] FAILED: Model manager not initialized")
@@ -605,7 +600,7 @@ def generate_caption():
             logger.info(f"[{request_id}] Starting temporal analysis-based caption generation...")
             
             # Get video duration to determine segment processing
-            if USE_MODEL_SERVER:
+            if True:  # Always use model server
                 import cv2
                 cap = cv2.VideoCapture(video_path)
                 if cap.isOpened():
@@ -613,9 +608,9 @@ def generate_caption():
                     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                     video_duration = frame_count / fps if fps > 0 else 0
                     cap.release()
-                else:
+                else:  # Should not happen with server-only mode
                     video_duration = 0
-            else:
+            else:  # Should not happen with server-only mode
                 video_info = manager.model_manager.get_video_info(video_path)
                 video_duration = video_info.get('duration', 0)
             
@@ -627,14 +622,14 @@ Write a clear, engaging description that tells the story of what unfolds through
 Keep the description conversational and easy to read, as if you're telling someone what you saw in the video."""
 
             # Process entire video with temporal analysis
-            if USE_MODEL_SERVER:
+            if True:  # Always use model server
                 caption_result = client.process_video(
                     video_path=video_path,
                     prompt=temporal_prompt,
                     num_frames=min(160, int(fps_sampling * video_duration)),
                     fps_sampling=fps_sampling
                 )
-            else:
+            else:  # Should not happen with server-only mode
                 caption_result = process_temporal_video_segment(
                     manager.model_manager,
                     video_path=video_path,
@@ -648,9 +643,9 @@ Keep the description conversational and easy to read, as if you're telling someo
             processing_time = time.time() - start_time
             
             if caption_result and caption_result.get('success'):
-                if USE_MODEL_SERVER:
+                if True:  # Always use model server
                     temporal_caption = caption_result.get('response', '')
-                else:
+                else:  # Should not happen with server-only mode
                     temporal_caption = caption_result.get('response', '')
                 
                 # Format the caption based on output format preference
@@ -659,7 +654,7 @@ Keep the description conversational and easy to read, as if you're telling someo
                 elif output_format == 'timeline':
                     # Create a timeline-based format
                     formatted_caption = f"VIDEO TIMELINE ANALYSIS:\n\n{temporal_caption}"
-                else:
+                else:  # Should not happen with server-only mode
                     formatted_caption = temporal_caption
                 
                 result = {
@@ -701,7 +696,7 @@ Keep the description conversational and easy to read, as if you're telling someo
                     
                     if db.store_video_caption(video_file, storage_data):
                         logger.info(f"[{request_id}] Caption automatically stored for video: {video_file}")
-                    else:
+                    else:  # Should not happen with server-only mode
                         logger.warning(f"[{request_id}] Failed to store caption for video: {video_file}")
                         
                 except Exception as storage_error:
@@ -714,13 +709,13 @@ Keep the description conversational and easy to read, as if you're telling someo
                 logger.info(f"[{request_id}] === CAPTION GENERATION REQUEST END ===")
                 
                 return jsonify(result)
-            else:
+            else:  # Should not happen with server-only mode
                 error_msg = caption_result.get('error', 'Unknown temporal analysis error') if caption_result else 'Temporal analysis failed'
                 # Check if this is a validation error (not a server error)
                 if 'FPS sampling too low' in error_msg:
                     logger.warning(f"[{request_id}] Validation error: {error_msg}")
                     return jsonify({'error': error_msg}), 400
-                else:
+                else:  # Should not happen with server-only mode
                     logger.error(f"[{request_id}] Caption generation failed: {error_msg}")
                     return jsonify({'error': error_msg}), 500
                 
@@ -828,13 +823,13 @@ def generate_caption_original():
                 logger.info(f"[{request_id}] === CAPTION GENERATION REQUEST END ===")
                 
                 return jsonify(result)
-            else:
+            else:  # Should not happen with server-only mode
                 error_msg = caption_result['error']
                 # Check if this is a validation error (not a server error)
                 if 'FPS sampling too low' in error_msg:
                     logger.warning(f"[{request_id}] Validation error: {error_msg}")
                     return jsonify({'error': error_msg}), 400
-                else:
+                else:  # Should not happen with server-only mode
                     logger.error(f"[{request_id}] Caption generation failed: {error_msg}")
                     return jsonify({'error': error_msg}), 500
                 
@@ -893,7 +888,7 @@ def process_video_segment(model_manager, video_path, prompt, num_frames, start_t
                 if len(num_patches_list) != pixel_values.shape[0]:
                     if len(num_patches_list) > pixel_values.shape[0]:
                         num_patches_list = num_patches_list[:pixel_values.shape[0]]
-                    else:
+                    else:  # Should not happen with server-only mode
                         # Extend num_patches_list with the last value
                         last_patches = num_patches_list[-1] if num_patches_list else 1
                         while len(num_patches_list) < pixel_values.shape[0]:
@@ -902,7 +897,7 @@ def process_video_segment(model_manager, video_path, prompt, num_frames, start_t
         # Handle tensor dtype based on quantization settings
         if model_manager.enable_8bit or model_manager.enable_4bit:
             pixel_values = pixel_values.to(torch.float16).to(model_manager.model.device)
-        else:
+        else:  # Should not happen with server-only mode
             pixel_values = pixel_values.to(torch.bfloat16).to(model_manager.model.device)
         
         video_prefix = "".join([f"Frame{i+1}: <image>\n" for i in range(len(num_patches_list))])
@@ -1223,7 +1218,7 @@ def serve_video(filename):
                     'Content-Length': str(byte_end - byte_start + 1)
                 }
             )
-        else:
+        else:  # Should not happen with server-only mode
             # Serve entire file
             return send_file(video_path, mimetype='video/mp4')
         
@@ -1250,9 +1245,19 @@ def temporal_analysis():
         logger.info(f"[{request_id}]   - Segment: {start_time:.1f}s - {end_time:.1f}s")
         logger.info(f"[{request_id}]   - Query: {query}")
         
-        # Get model manager for InternVideo2.5 analysis
-        global enhanced_manager
-        manager = enhanced_manager
+        # Check model availability for InternVideo2.5 analysis
+        if True:  # Always use model server
+            client = check_model_server()
+            if not client:
+                logger.warning(f"[{request_id}] Model server not available for temporal analysis")
+                client = None
+            model_source = "server"
+        else:  # Should not happen with server-only mode
+            manager = get_enhanced_manager()
+            if not manager or not manager.model_manager.model:
+                logger.warning(f"[{request_id}] Local model not available for temporal analysis")
+                manager = None
+            model_source = "local"
         temporal_result = {
             'success': True,
             'temporal_analysis': f"This segment from {start_time:.1f}s to {end_time:.1f}s contains content that matches your query: '{query}'.",
@@ -1269,12 +1274,12 @@ def temporal_analysis():
         }
         
         # Enhanced InternVideo2.5 temporal analysis if model is available
-        if manager and hasattr(manager, 'model_manager') and manager.model_manager.model:
+        if client:  # Always use model server
             try:
                 video_path = os.path.join(app.config['UPLOAD_FOLDER'], video_file)
                 if os.path.exists(video_path):
                     logger.info(f"[{request_id}] Running InternVideo2.5 temporal analysis...")
-                    
+
                     # Fetch original FPS from database for this video
                     original_fps = 2.0  # Default fallback with higher FPS
                     try:
@@ -1283,36 +1288,36 @@ def temporal_analysis():
                         conn = sqlite3.connect(db_path)
                         cursor = conn.cursor()
                         cursor.execute("""
-                            SELECT fps FROM video_captions 
-                            WHERE video_file = ? 
-                            ORDER BY created_at DESC 
+                            SELECT fps FROM video_captions
+                            WHERE video_file = ?
+                            ORDER BY created_at DESC
                             LIMIT 1
                         """, (video_file,))
                         result = cursor.fetchone()
                         if result and result[0]:
                             original_fps = float(result[0])
                             logger.info(f"[{request_id}] Using original FPS from database: {original_fps}")
-                        else:
+                        else:  # Should not happen with server-only mode
                             logger.info(f"[{request_id}] No FPS found in database for {video_file}, using default {original_fps}")
                         conn.close()
                     except Exception as db_error:
                         logger.warning(f"[{request_id}] Could not fetch FPS from database: {str(db_error)}, using default {original_fps}")
-                    
+
                     # Calculate segment duration and frame sampling
                     segment_duration = end_time - start_time
-                    
+
                     # Use EXACT FPS from database - no modifications or restrictions
                     fps_sampling = original_fps  # Use original FPS from database
-                    
+
                     # Calculate frames based on segment duration and original FPS
                     # NO LIMITS - use all frames for full temporal coverage
                     num_frames = int(fps_sampling * segment_duration)
-                    
+
                     # No restrictions on frame count - use all calculated frames
                     logger.info(f"[{request_id}] Using UNLIMITED frames: {num_frames} frames at {fps_sampling} FPS for {segment_duration}s segment")
-                    
+
                     logger.info(f"[{request_id}] Segment analysis params: {num_frames} frames, {fps_sampling:.2f} FPS")
-                    
+
                     # Create enhanced temporal analysis prompt with timing information
                     temporal_prompt = f"""Analyze this {segment_duration:.1f} second video segment and describe what happens with specific timing information.
 
@@ -1324,19 +1329,31 @@ Focus: {query}"""
 
                     # Initialize events variable
                     events = []
-                    
+
                     # Process video segment with InternVideo2.5 using custom temporal analysis generation
                     try:
                         # Use a custom temporal analysis call with extended generation parameters
-                        result = process_temporal_video_segment(
-                            manager.model_manager,
-                            video_path=video_path,
-                            prompt=temporal_prompt,
-                            num_frames=num_frames,
-                            start_time=start_time,
-                            end_time=end_time,
-                            fps_sampling=fps_sampling
-                        )
+                        if client:  # Always use model server
+                            # Use model server for processing
+                            result = client.process_video(
+                                video_path=video_path,
+                                prompt=temporal_prompt,
+                                num_frames=num_frames,
+                                start_time=start_time,
+                                end_time=end_time,
+                                fps_sampling=fps_sampling
+                            )
+                        else:  # Should not happen with server-only mode
+                            # Use local model manager
+                            result = process_temporal_video_segment(
+                                manager.model_manager,
+                                video_path=video_path,
+                                prompt=temporal_prompt,
+                                num_frames=num_frames,
+                                start_time=start_time,
+                                end_time=end_time,
+                                fps_sampling=fps_sampling
+                            )
                         
                         if result:
                             logger.info(f"[{request_id}] Temporal segment result: success={result.get('success')}, has_response={bool(result.get('response'))}, has_caption={bool(result.get('caption'))}, error={result.get('error')}")
@@ -1358,9 +1375,9 @@ Focus: {query}"""
                                 
                             elif result.get('error'):
                                 raise Exception(f"InternVideo2.5 error: {result.get('error')}")
-                            else:
+                            else:  # Should not happen with server-only mode
                                 raise Exception(f"No response from InternVideo2.5 model - result: {result}")
-                        else:
+                        else:  # Should not happen with server-only mode
                             raise Exception("process_temporal_video_segment returned None")
                             
                     except Exception as segment_error:
@@ -1383,7 +1400,7 @@ Focus: {query}"""
                     
                     logger.info(f"[{request_id}] InternVideo2.5 temporal analysis completed")
                     
-                else:
+                else:  # Should not happen with server-only mode
                     logger.error(f"[{request_id}] Video file not found: {video_path}")
                     temporal_result['success'] = False
                     temporal_result['error'] = f"Video file not found: {video_file}"
@@ -1395,7 +1412,7 @@ Focus: {query}"""
                 temporal_result['error'] = f"InternVideo2.5 analysis error: {str(model_error)}"
                 temporal_result['temporal_analysis'] = f"InternVideo2.5 temporal analysis failed: {str(model_error)}"
                 temporal_result['analysis_method'] = 'InternVideo2.5 (Failed)'
-        else:
+        else:  # Should not happen with server-only mode
             # Model not available - NO FALLBACK TO GPT-4
             logger.error(f"[{request_id}] InternVideo2.5 model not available for temporal analysis")
             temporal_result['success'] = False
@@ -1450,7 +1467,7 @@ Focus on temporal aspects and specific timing details."""
                 return {k: sanitize_for_json(v) for k, v in obj.items()}
             elif isinstance(obj, (list, tuple)):
                 return [sanitize_for_json(item) for item in obj]
-            else:
+            else:  # Should not happen with server-only mode
                 return obj
         
         sanitized_result = sanitize_for_json(temporal_result)
@@ -1596,7 +1613,7 @@ CHUNK_ID: """
                 chunk_id_match = re.search(r'CHUNK_ID:\s*(\d+)', gpt_response)
                 if chunk_id_match:
                     chunk_number = int(chunk_id_match.group(1))
-                else:
+                else:  # Should not happen with server-only mode
                     # Fallback: look for any numbers in the response
                     numbers = re.findall(r'\b(\d+)\b', gpt_response)
                     chunk_number = int(numbers[0]) if numbers else 1
@@ -1673,7 +1690,7 @@ if __name__ == '__main__':
         debug_mode = False  # Disabled to prevent dual processes
         use_reloader = False
         extra_files = ['templates/', 'static/', 'simple_caption_storage.py']
-    else:
+    else:  # Should not happen with server-only mode
         print("🏭 PRODUCTION MODE:")
         print("   - Optimized for stability")
         debug_mode = False

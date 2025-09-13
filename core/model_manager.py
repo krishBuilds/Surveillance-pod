@@ -323,7 +323,8 @@ class ModelManager:
         fps_sampling: float = None,
         time_bound: float = None,
         start_time: float = None,
-        end_time: float = None
+        end_time: float = None,
+        generation_config: Dict = None
     ) -> Dict:
         """
         Process a video with the model using real inference
@@ -384,15 +385,21 @@ class ModelManager:
                 logger.info("Using bfloat16 precision for full precision model")
             
             video_prefix = "".join([f"Frame{i+1}: <image>\n" for i in range(len(num_patches_list))])
-            
-            # Prepare generation config
-            generation_config = dict(
-                do_sample=False,
-                temperature=0.0,
-                max_new_tokens=max_tokens,
-                top_p=0.1,
-                num_beams=1
-            )
+
+            # Prepare generation config - use provided config or default
+            if generation_config is None:
+                generation_config = dict(
+                    do_sample=False,
+                    temperature=0.0,
+                    max_new_tokens=max_tokens,
+                    top_p=0.1,
+                    num_beams=1
+                )
+            else:
+                # Use provided generation config but ensure max_tokens is set
+                generation_config = generation_config.copy()
+                if 'max_new_tokens' not in generation_config:
+                    generation_config['max_new_tokens'] = max_tokens
             
             # Build full question with video frames
             question = video_prefix + prompt
@@ -770,19 +777,45 @@ class ModelManager:
         ])
         return frame_indices
     
+    def get_video_info(self, video_path: str) -> dict:
+        """Get basic video information using OpenCV"""
+        try:
+            import cv2
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                video_duration = frame_count / fps if fps > 0 else 0
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                cap.release()
+
+                return {
+                    'duration': video_duration,
+                    'fps': fps,
+                    'frame_count': frame_count,
+                    'width': width,
+                    'height': height
+                }
+            else:
+                return {'duration': 0, 'fps': 0, 'frame_count': 0, 'width': 0, 'height': 0}
+        except Exception as e:
+            logger.warning(f"Could not get video info for {video_path}: {e}")
+            return {'duration': 0, 'fps': 0, 'frame_count': 0, 'width': 0, 'height': 0}
+
     def _get_num_frames_by_duration(self, duration):
         """Calculate number of frames based on video duration"""
         local_num_frames = 4
         num_segments = int(duration // local_num_frames)
-        
+
         if num_segments == 0:
             num_frames = local_num_frames
         else:
             num_frames = local_num_frames * num_segments
-        
+
         num_frames = min(512, num_frames)
         num_frames = max(128, num_frames)
-        
+
         return num_frames
     
     def _load_video_for_inference(

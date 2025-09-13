@@ -91,6 +91,17 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
                 'request_id': request_id
             }
             
+            # Create enhanced generation config for streaming (same as local model)
+            enhanced_generation_config = dict(
+                do_sample=True,  # Enable sampling for varied descriptive responses
+                temperature=0.3,  # Optimal for factual yet diverse descriptions (0.2-0.5 range)
+                max_new_tokens=512,  # Increased for better quality responses
+                top_p=0.8,  # Use nucleus sampling for better quality
+                num_beams=1,
+                repetition_penalty=1.2,  # Prevent repetitive content more strongly
+                length_penalty=1.0  # Normal length penalty
+            )
+
             # Process the chunk
             result = process_video_segment(
                 model_manager=manager,
@@ -99,7 +110,8 @@ def process_video_for_caption_streaming(manager, video_path: str, video_file: st
                 num_frames=manager.model_manager.get_optimal_frame_count(),
                 start_time=chunk['start_time'],
                 end_time=chunk['end_time'],
-                fps_sampling=fps_sampling
+                fps_sampling=fps_sampling,
+                generation_config=enhanced_generation_config
             )
             
             chunk_processing_time = time.time() - chunk_start_time
@@ -251,6 +263,17 @@ def process_video_for_caption_optimized(manager, video_path: str, video_file: st
         if duration <= max_duration:
             logger.info(f"[{request_id}] Video is short ({duration:.1f}s), processing in single pass")
             
+            # Create enhanced generation config for streaming (same as local model)
+            enhanced_generation_config = dict(
+                do_sample=True,  # Enable sampling for varied descriptive responses
+                temperature=0.3,  # Optimal for factual yet diverse descriptions (0.2-0.5 range)
+                max_new_tokens=512,  # Increased for better quality responses
+                top_p=0.8,  # Use nucleus sampling for better quality
+                num_beams=1,
+                repetition_penalty=1.2,  # Prevent repetitive content more strongly
+                length_penalty=1.0  # Normal length penalty
+            )
+
             result = process_video_segment(
                 model_manager=manager,
                 video_path=video_path,
@@ -258,7 +281,8 @@ def process_video_for_caption_optimized(manager, video_path: str, video_file: st
                 num_frames=manager.model_manager.get_optimal_frame_count(),
                 start_time=0,
                 end_time=duration,
-                fps_sampling=fps_sampling
+                fps_sampling=fps_sampling,
+                generation_config=enhanced_generation_config
             )
             
             if result.get('success'):
@@ -379,10 +403,11 @@ def format_captions_as_list(captions: List[Dict]) -> str:
 
 # Import the process_video_segment function from video_processing
 def process_video_segment(model_manager, video_path: str, prompt: str, num_frames: int,
-                         start_time: float, end_time: float, fps_sampling: float = 1.0) -> Dict:
+                         start_time: float, end_time: float, fps_sampling: float = 1.0,
+                         generation_config: Dict = None) -> Dict:
     """Import from video_processing module"""
     from .video_processing import process_video_segment as video_process_segment
     return video_process_segment(
-        model_manager, video_path, prompt, num_frames, 
-        start_time, end_time, fps_sampling
+        model_manager, video_path, prompt, num_frames,
+        start_time, end_time, fps_sampling, generation_config
     )

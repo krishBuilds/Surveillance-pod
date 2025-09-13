@@ -12,8 +12,9 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-def process_video_segment(model_manager, video_path: str, prompt: str, num_frames: int, 
-                         start_time: float, end_time: float, fps_sampling: float = 1.0) -> Dict:
+def process_video_segment(model_manager, video_path: str, prompt: str, num_frames: int,
+                         start_time: float, end_time: float, fps_sampling: float = 1.0,
+                         generation_config: Dict = None) -> Dict:
     """
     Process a video segment with temporal bounds and frame control
     
@@ -33,13 +34,14 @@ def process_video_segment(model_manager, video_path: str, prompt: str, num_frame
     
     try:
         # Process video segment directly using the model manager with temporal bounds
-        result = model_manager.model_manager.process_video(
+        result = model_manager.process_video(
             video_path=video_path,
             prompt=prompt,
             num_frames=num_frames,
             fps_sampling=fps_sampling,
             start_time=start_time,
-            end_time=end_time
+            end_time=end_time,
+            generation_config=generation_config
         )
         
         if result and result.get('success'):
@@ -85,7 +87,8 @@ def process_video_segment(model_manager, video_path: str, prompt: str, num_frame
         }
 
 def process_temporal_video_segment(model_manager, video_path: str, prompt: str, num_frames: int,
-                                 start_time: float, end_time: float, fps_sampling: float = 1.0) -> Dict:
+                                 start_time: float, end_time: float, fps_sampling: float = 1.0,
+                                 generation_config: Dict = None) -> Dict:
     """
     Process video segment with temporal analysis - focused on time-based events
     
@@ -104,16 +107,14 @@ def process_temporal_video_segment(model_manager, video_path: str, prompt: str, 
     logger.info(f"Processing temporal video segment: {start_time:.1f}s-{end_time:.1f}s")
     
     try:
-        # Use temporal-specific prompt
-        temporal_prompt = f"""
-        Analyze this video segment from {start_time:.1f}s to {end_time:.1f}s and provide:
-        1. Key events and actions that occur
-        2. Timeline of activities
-        3. Notable changes or transitions
-        4. {prompt}
-        
-        Focus on temporal progression and sequence of events.
-        """
+        # Use a more natural prompt that avoids structured lists
+        temporal_prompt = f"""{prompt}
+
+Focus on what happens in this {end_time - start_time:.1f} second video segment from {start_time:.1f}s to {end_time:.1f}s.
+
+Describe the main actions, characters, and events in a natural, flowing narrative. Include key moments and any important changes that occur during this time period.
+
+Write your response as a descriptive paragraph rather than a numbered list."""
         
         result = process_video_segment(
             model_manager=model_manager,
@@ -122,7 +123,8 @@ def process_temporal_video_segment(model_manager, video_path: str, prompt: str, 
             num_frames=num_frames,
             start_time=start_time,
             end_time=end_time,
-            fps_sampling=fps_sampling
+            fps_sampling=fps_sampling,
+            generation_config=generation_config
         )
         
         if result.get('success'):
