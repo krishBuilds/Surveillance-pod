@@ -384,9 +384,15 @@ class ModelManager:
                 pixel_values = pixel_values.to(torch.bfloat16).to(self.model.device)
                 logger.info("Using bfloat16 precision for full precision model")
             
-            # Use standard video prefix to avoid tracking behavior
-            video_prefix = "".join([f"Frame{i+1}: <image>\n" for i in range(len(num_patches_list))])
-            logger.info(f"Using standard video prefix for {len(num_patches_list)} frames")
+            # Use enhanced video prefix with timestamps when available
+            if hasattr(self, 'current_frame_timestamps') and self.current_frame_timestamps and len(self.current_frame_timestamps) == len(num_patches_list):
+                # Use temporal video prefix with timestamps
+                video_prefix = "".join([f"Frame{i+1} (t={self.current_frame_timestamps[i]:.1f}s): <image>\n" for i in range(len(num_patches_list))])
+                logger.info(f"Using temporal video prefix with timestamps for {len(num_patches_list)} frames")
+            else:
+                # Fall back to standard video prefix
+                video_prefix = "".join([f"Frame{i+1}: <image>\n" for i in range(len(num_patches_list))])
+                logger.info(f"Using standard video prefix for {len(num_patches_list)} frames")
 
             # Prepare generation config - use provided config or enhanced default
             if generation_config is None:

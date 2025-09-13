@@ -107,39 +107,54 @@ def process_temporal_video_segment(model_manager, video_path: str, prompt: str, 
     logger.info(f"Processing temporal video segment: {start_time:.1f}s-{end_time:.1f}s")
 
     try:
-        # Calculate frame timestamps for enhanced temporal analysis
+        # Calculate frame timestamps for the model manager to use in temporal analysis
         frame_timestamps = []
         for i in range(num_frames):
             timestamp = start_time + (i / fps_sampling)
             if timestamp <= end_time:
                 frame_timestamps.append(timestamp)
 
-        # Create enhanced temporal prompt with full frame annotation
-        frame_annotations = []
-        # Show all frames with timestamps
-        for i, timestamp in enumerate(frame_timestamps):
-            frame_annotations.append(f"Frame {i+1} (t={timestamp:.1f}s): <image>")
-
-        temporal_prompt = "What happens in this video? Describe the main actions and events."
-
-        # Use more permissive generation config to avoid tracking mode
+        # Use enhanced generation config for detailed temporal analysis
         temporal_generation_config = {
             'do_sample': True,
-            'temperature': 0.7,    # Higher temperature for more creative output
-            'max_new_tokens': 1024,
+            'temperature': 0.8,    # Higher temperature for more detailed output
+            'max_new_tokens': 1536,  # Increased tokens for more detailed analysis
             'top_p': 0.9,
             'num_beams': 1,
-            'repetition_penalty': 1.1,
-            'length_penalty': 1.0
+            'repetition_penalty': 1.2,  # Higher penalty to avoid repetition
+            'length_penalty': 1.2     # Encourage longer, more detailed responses
         }
 
         # Override with provided config or use temporal defaults
         final_generation_config = generation_config if generation_config else temporal_generation_config
 
+        # Combine user prompt with temporal instructions
+        enhanced_prompt = f"""{prompt}
+
+ENHANCED TEMPORAL ANALYSIS REQUIREMENTS:
+- Analyze this video segment from {start_time:.1f}s to {end_time:.1f}s with high granularity
+- Include specific timestamps for EVERY distinct action and event (minimum 6-8 timestamped events per chunk)
+- Provide detailed chronological timeline with precise timing
+- Capture micro-actions: hand movements, body posture changes, object interactions, facial expressions
+- Note when activities start, pause, resume, and end
+- Include transition moments between major actions
+
+Required format examples:
+- At 0.0s: [person/action enters frame]
+- Around 1.2s: [specific hand movement or object interaction]
+- At 2.5s: [body position change or significant action]
+- From 3.0s to 5.2s: [continuous activity description]
+- Around 6.8s: [transition or new action begins]
+- At 8.1s: [detailed object manipulation or interaction]
+- From 10.3s to 12.7s: [extended activity with details]
+- Around 15.0s: [concluding action or preparation to exit]
+
+Break down the timeline into 2-3 second intervals and document all observable changes."""
+
         result = process_video_segment(
             model_manager=model_manager,
             video_path=video_path,
-            prompt=temporal_prompt,
+            prompt=enhanced_prompt,
             num_frames=num_frames,
             start_time=start_time,
             end_time=end_time,
